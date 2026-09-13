@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+uv.lock
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment config
+src/minicode/.env
+
+# Session data
+.minicode/
+
+# Reference project
+.example/
+
+# Tests & cache
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Markdown (except README.md)
+*.md
+!README.md
+
