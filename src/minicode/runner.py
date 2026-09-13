@@ -21,6 +21,7 @@ from minicode.tools.builtin.bash import BashTool
 from minicode.tools.builtin.list_dir import ListDirTool
 from minicode.tools.builtin.read_file import ReadFileTool
 from minicode.tools.builtin.write_file import WriteFileTool
+from minicode.tools.permissions import PermissionManager
 from minicode.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -114,7 +115,13 @@ class AgentRunner:
 
             session_dir = Path("runs") / run_id
             compactor = Compactor(session_dir, session_id or "")
-            loop = AgentLoop(provider, registry, compactor=compactor, compact_threshold=self._config.compact_threshold)
+            permission_manager = PermissionManager()
+            loop = AgentLoop(
+                provider, registry,
+                compactor=compactor,
+                compact_threshold=self._config.compact_threshold,
+                permission_manager=permission_manager,
+            )
             await loop.run(context, on_delta=on_delta, on_tool_call=on_tool_call, on_tool_result=on_tool_result)
         except asyncio.CancelledError:
             cancelled = True

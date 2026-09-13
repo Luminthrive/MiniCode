@@ -13,6 +13,7 @@ from minicode.tools.registry import ToolRegistry
 if TYPE_CHECKING:
     from minicode.compact.compactor import Compactor
     from minicode.llm.base import DeltaCallback, LLMProvider
+    from minicode.tools.permissions import PermissionManager
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,13 @@ class AgentLoop:
         *,
         compactor: Compactor | None = None,
         compact_threshold: float = 0.80,
+        permission_manager: PermissionManager | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._compactor = compactor
         self._compact_threshold = compact_threshold
+        self._permission_manager = permission_manager
 
     async def run(
         self,
@@ -106,7 +109,10 @@ class AgentLoop:
                 for tc in response.tool_calls:
                     if on_tool_call:
                         await on_tool_call(tc.name, tc.input)
-                    result = await invoke_tool(self._registry, tc, context.run_id)
+                    result = await invoke_tool(
+                        self._registry, tc, context.run_id,
+                        permission_manager=self._permission_manager,
+                    )
                     if on_tool_result:
                         await on_tool_result(tc.name, result.content, result.is_error)
                     context.add_tool_result(tc.id, result.content, is_error=result.is_error)
