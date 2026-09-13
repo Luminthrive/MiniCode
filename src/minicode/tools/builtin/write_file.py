@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from minicode.tools.base import BaseTool, ToolResult
+from minicode.tools.base import BaseTool, ToolResult, check_path_safety
 
 _MAX_BYTES = 1 * 1024 * 1024  # 1 MB
 
@@ -50,8 +50,9 @@ class WriteFileTool(BaseTool):
         path_str = p.path
         content = p.content
 
-        if ".." in Path(path_str).parts:
-            raise PermissionError(f"path traversal not allowed: {path_str}")
+        safety_error = check_path_safety(path_str)
+        if safety_error:
+            return ToolResult(content=safety_error, is_error=True, error_type="permission_denied")
 
         encoded = content.encode("utf-8")
         if len(encoded) > _MAX_BYTES:

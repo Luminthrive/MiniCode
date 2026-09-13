@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from minicode.tools.base import BaseTool, ToolResult
+from minicode.tools.base import BaseTool, ToolResult, check_path_safety
 
 _MAX_DEPTH = 4
 _MAX_ENTRIES = 200
@@ -51,8 +51,9 @@ class ListDirTool(BaseTool):
         path_str = p.path
         max_depth = p.max_depth
 
-        if ".." in Path(path_str).parts:
-            raise PermissionError(f"path traversal not allowed: {path_str}")
+        safety_error = check_path_safety(path_str)
+        if safety_error:
+            return ToolResult(content=safety_error, is_error=True, error_type="permission_denied")
 
         root = Path(path_str)
         if not root.exists():

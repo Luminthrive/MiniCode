@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
@@ -77,14 +76,6 @@ def _make_delta_collector() -> tuple[Any, list[str]]:
     return on_delta, buf
 
 
-# 渲染 markdown 输出
-def _render_markdown(text: str) -> None:
-    """用 rich 渲染 markdown"""
-    console.print()
-    console.print(Markdown(text))
-    console.print()
-
-
 # 工具调用展示：单行
 def _make_tool_call_printer() -> Any:
     """创建工具调用回调"""
@@ -122,7 +113,7 @@ def _run_command(goal: str) -> None:
     console.print()
     console.print(Panel(goal, title="[bold]Goal[/bold]", border_style="blue"))
 
-    on_delta, buf = _make_delta_collector()
+    on_delta, _ = _make_delta_collector()
     outcome = asyncio.run(runner.run_and_capture(
         goal,
         on_delta=on_delta,
@@ -130,13 +121,12 @@ def _run_command(goal: str) -> None:
         on_tool_result=_make_tool_result_printer(),
     ))
 
-    _render_markdown("".join(buf))
-
     elapsed = time.time() - t0
+    console.print()
     status_style = "bold green" if outcome.status == "success" else "bold red"
-    console.print(f"[{status_style}][{outcome.status}][/{status_style}] {elapsed:.1f}s")
+    console.print(f"[{status_style}][{outcome.status}] {elapsed:.1f}s[/]", highlight=False)
     if outcome.status != "success":
-        console.print(f"[red]Error: {outcome.reason}[/red]")
+        console.print(f"[red]Error: {outcome.reason}[/red]", highlight=False)
         sys.exit(1)
 
 
@@ -190,7 +180,7 @@ def _chat_command(session_id: str = "default") -> None:
             continue
 
         t0 = time.time()
-        on_delta, buf = _make_delta_collector()
+        on_delta, _ = _make_delta_collector()
         outcome = asyncio.run(runner.run_and_capture(
             user_input,
             prefill_messages=history,
@@ -200,11 +190,9 @@ def _chat_command(session_id: str = "default") -> None:
         ))
         elapsed = time.time() - t0
 
-        # 渲染 markdown 回复
-        _render_markdown("".join(buf))
-
+        console.print()
         status_style = "bold green" if outcome.status == "success" else "bold red"
-        console.print(f"[{status_style}][{outcome.status}][/{status_style}] {elapsed:.1f}s")
+        console.print(f"[{status_style}][{outcome.status}] {elapsed:.1f}s[/]", highlight=False)
         console.print()
 
         # 持久化：保存新消息到 session

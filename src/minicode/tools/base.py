@@ -14,8 +14,17 @@ from pydantic import BaseModel
 class ToolResult:
     content: str
     is_error: bool = False
-    # "runtime_error" | "timeout" | "schema_error"
+    # "runtime_error" | "timeout" | "schema_error" | "permission_denied"
     error_type: str | None = None
+
+
+# 路径安全检查：检测路径遍历
+def check_path_safety(path_str: str) -> str | None:
+    """检查路径是否安全，返回错误信息或 None"""
+    from pathlib import Path
+    if ".." in Path(path_str).parts:
+        return f"path traversal not allowed: {path_str}"
+    return None
 
 
 # 所有工具的抽象基类，定义工具接口和输入 schema

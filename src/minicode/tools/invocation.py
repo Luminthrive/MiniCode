@@ -1,17 +1,20 @@
-"""工具调用入口：校验参数、限时调用、重试，返回 ToolResult"""
+"""工具调用入口：权限检查、校验参数、限时调用、重试，返回 ToolResult"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from pydantic import ValidationError
 
 from minicode.llm.types import ToolCallBlock
 from minicode.tools.base import ToolResult
 from minicode.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from minicode.tools.permissions import PermissionManager
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +23,13 @@ _MAX_RETRIES: int = 2
 _RETRY_BASE_S: float = 2.0
 
 
-# 校验参数、限时调用工具，失败时指数退避重试，返回 ToolResult（不抛异常）
+# 校验参数、权限检查、限时调用工具，失败时指数退避重试，返回 ToolResult（不抛异常）
 async def invoke_tool(
     registry: ToolRegistry,
     tool_call: ToolCallBlock,
     run_id: str,
     timeout: float = _DEFAULT_TIMEOUT,
+    permission_manager: PermissionManager | None = None,
 ) -> ToolResult:
     t0 = time.monotonic()
 
@@ -40,6 +44,16 @@ async def invoke_tool(
             is_error=True,
             error_type="runtime_error",
         )
+
+    # 权限检查
+    if permission_manager is not None:
+        verdict = await permission_manager.check(tool_call.name, dict(tool_call.input))
+        if verdict.verdict == "deny":
+            return ToolResult(
+                content=f"permission denied: {verdict.reason}",
+                is_error=True,
+                error_type="permission_denied",
+            )
 
     if tool.params_model is not None:
         try:

@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from minicode.tools.base import BaseTool, ToolResult
+from minicode.tools.base import BaseTool, ToolResult, check_path_safety
 
 _MAX_BYTES = 512 * 1024  # 512 KB
 
@@ -42,8 +42,9 @@ class ReadFileTool(BaseTool):
     async def invoke(self, params: dict[str, Any]) -> ToolResult:
         path_str = ReadFileParams.model_validate(params).path
 
-        if ".." in Path(path_str).parts:
-            raise PermissionError(f"path traversal not allowed: {path_str}")
+        safety_error = check_path_safety(path_str)
+        if safety_error:
+            return ToolResult(content=safety_error, is_error=True, error_type="permission_denied")
 
         path = Path(path_str)
         raw = path.read_bytes()
