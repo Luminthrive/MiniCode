@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
-import os
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ class PermissionManager:
                 )
                 verdict = VERDICT_ALLOW if approved else VERDICT_DENY
                 reason = "approved by user" if approved else "denied by user"
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 verdict = VERDICT_DENY
                 reason = f"approval timed out after {self._approval_timeout}s"
         else:

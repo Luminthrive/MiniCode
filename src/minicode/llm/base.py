@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Awaitable, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Protocol
 
 from minicode.llm.types import LlmResponse
-
 
 # 流式增量回调：接收文本片段
 DeltaCallback = Callable[[str], Awaitable[None]]
