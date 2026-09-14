@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 import time
 from datetime import UTC, datetime
@@ -11,23 +12,28 @@ from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
 
 from minicode import __version__
 
 console = Console()
 
 
+# 配置日志级别
 def _setup_logging(verbose: bool) -> None:
-    """配置日志级别"""
-    import logging
     level = logging.DEBUG if verbose else logging.WARNING
-    logging.basicConfig(level=level, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S")
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
 
+# CLI 主入口
 def main() -> None:
-    """CLI 主入口"""
-    parser = argparse.ArgumentParser(prog="minicode", description="MiniCode - 轻量级本地 AI Agent 系统")
+    parser = argparse.ArgumentParser(
+        prog="minicode",
+        description="MiniCode - 轻量级本地 AI Agent 系统",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true", help="显示调试日志")
     subparsers = parser.add_subparsers(dest="command")
@@ -133,10 +139,11 @@ def _run_command(goal: str) -> None:
 def _chat_command(session_id: str = "default") -> None:
     """交互式聊天模式（支持多会话持久化）"""
     from pathlib import Path
+
     from minicode.config import get_config
     from minicode.runner import AgentRunner
-    from minicode.session.store import SessionStore
     from minicode.session.model import Session
+    from minicode.session.store import SessionStore
 
     config = get_config()
     runner = AgentRunner(config)
@@ -163,7 +170,9 @@ def _chat_command(session_id: str = "default") -> None:
         console.print(f"[dim]📂 Loaded {len(history)} previous messages[/dim]")
 
     console.print()
-    console.print(Panel("type 'quit' to exit", title="[bold]MiniCode Chat[/bold]", border_style="blue"))
+    console.print(
+        Panel("type 'quit' to exit", title="[bold]MiniCode Chat[/bold]", border_style="blue")
+    )
     console.print()
 
     while True:
@@ -183,6 +192,8 @@ def _chat_command(session_id: str = "default") -> None:
         on_delta, _ = _make_delta_collector()
         outcome = asyncio.run(runner.run_and_capture(
             user_input,
+            session_id=session.id,
+            store=store,
             prefill_messages=history,
             on_delta=on_delta,
             on_tool_call=_make_tool_call_printer(),
@@ -195,7 +206,5 @@ def _chat_command(session_id: str = "default") -> None:
         console.print(f"[{status_style}][{outcome.status}] {elapsed:.1f}s[/]", highlight=False)
         console.print()
 
-        # 持久化：保存新消息到 session
-        history = history + outcome.new_messages
-        if outcome.new_messages:
-            store.append_messages(session.id, outcome.new_messages, run_id="chat")
+        # 落盘由 runner 负责；这里只需同步内存中的会话状态
+        history = outcome.messages

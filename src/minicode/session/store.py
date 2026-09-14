@@ -91,6 +91,21 @@ class SessionStore:
                     row["content"] = msg.get("content", "")
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    # 备份现有 thread.jsonl 后整体重写（压缩后使用，使磁盘状态与内存一致）
+    def rewrite_messages(
+        self,
+        sid: str,
+        messages: list[dict[str, Any]],
+        run_id: str,
+    ) -> None:
+        path = self.session_dir(sid)
+        path.mkdir(parents=True, exist_ok=True)
+        thread = path / "thread.jsonl"
+        if thread.exists():
+            ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+            thread.rename(path / f"thread_{ts}.jsonl.bak")
+        self.append_messages(sid, messages, run_id)
+
     # 读取完整 thread 并返回 OpenAI 格式 messages（含 tool 角色）
     def read_messages(self, sid: str) -> list[dict[str, Any]]:
         path = self.session_dir(sid) / "thread.jsonl"

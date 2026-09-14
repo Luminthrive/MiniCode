@@ -24,7 +24,7 @@ class ToolCallBlock:
 # LLM 响应：停止原因、工具调用列表、文本内容和使用统计
 @dataclass
 class LlmResponse:
-    stop_reason: str  # "stop" | "tool_calls"
+    stop_reason: str  # "stop" | "tool_calls" | "length"（length 表示被 max_tokens 截断）
     tool_calls: list[ToolCallBlock] = field(default_factory=list)
     text: str = ""
     usage: UsageStats | None = None

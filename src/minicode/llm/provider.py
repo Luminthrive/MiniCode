@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -62,8 +63,13 @@ class OpenAIProvider:
         _fn = on_delta or _noop
         return await self._chat_stream(payload, run_id, _fn)
 
-    async def _chat_stream(self, payload: dict[str, Any], run_id: str, on_delta: DeltaCallback) -> LlmResponse:
-        import asyncio
+    # 流式调用 API，逐片段回调文本，累积工具调用后返回完整响应
+    async def _chat_stream(
+        self,
+        payload: dict[str, Any],
+        run_id: str,
+        on_delta: DeltaCallback,
+    ) -> LlmResponse:
         payload["stream"] = True
         logger.debug("LLM stream request: model=%s msgs=%d tools=%d",
                       payload["model"], len(payload["messages"]),
@@ -110,9 +116,11 @@ class OpenAIProvider:
 
                         if finish:
                             # tool_calls 只在确实有工具调用时才设为 "tool_calls"
-                            has_tool_calls = bool(delta.get("tool_calls") or tc_buffer)
-                            if finish == "tool_calls" and has_tool_calls:
+                            if finish == "tool_calls" and bool(tc_buffer):
                                 stop_reason = "tool_calls"
+                            elif finish == "length":
+                                # 输出被 max_tokens 截断，内容不完整
+                                stop_reason = "length"
                             else:
                                 stop_reason = "stop"
 
@@ -124,7 +132,11 @@ class OpenAIProvider:
                         for tc_delta in delta.get("tool_calls") or []:
                             idx = tc_delta.get("index", 0)
                             if idx not in tc_buffer:
-                                tc_buffer[idx] = {"id": tc_delta.get("id", ""), "name": "", "arguments": ""}
+                                tc_buffer[idx] = {
+                                    "id": tc_delta.get("id", ""),
+                                    "name": "",
+                                    "arguments": "",
+                                }
                             buf = tc_buffer[idx]
                             if tc_delta.get("id"):
                                 buf["id"] = tc_delta["id"]
@@ -157,14 +169,26 @@ class OpenAIProvider:
                              stop_reason, len(tool_calls), len("".join(text_parts)))
                 break
 
-            except (httpx.HTTPStatusError, httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as exc:
-                logger.warning("LLM stream error (attempt %d/%d) run_id=%s: %s", attempt, _MAX_RETRIES, run_id, exc)
+            except (
+                httpx.HTTPStatusError,
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.ConnectError,
+            ) as exc:
+                logger.warning(
+                    "LLM stream error (attempt %d/%d) run_id=%s: %s",
+                    attempt, _MAX_RETRIES, run_id, exc,
+                )
                 if attempt == _MAX_RETRIES:
                     raise
-                import asyncio
                 await asyncio.sleep(_RETRY_BACKOFF_S[attempt - 1])
 
-        return LlmResponse(stop_reason=stop_reason, tool_calls=tool_calls, text="".join(text_parts), usage=usage)
+        return LlmResponse(
+            stop_reason=stop_reason,
+            tool_calls=tool_calls,
+            text="".join(text_parts),
+            usage=usage,
+        )
 
     async def close(self) -> None:
         await self._client.aclose()

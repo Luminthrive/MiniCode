@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from minicode.context import ExecutionContext
 from minicode.tools.invocation import invoke_tool
@@ -104,8 +104,8 @@ class AgentLoop:
                 ]
             context.add_assistant_message(response.text, openai_tool_calls)
 
-            # 有 tool_calls 就必须执行，不管 stop_reason
-            if response.tool_calls:
+            # 有 tool_calls 就必须执行；但输出被 max_tokens 截断时参数可能是残缺 JSON，不执行
+            if response.tool_calls and response.stop_reason != "length":
                 for tc in response.tool_calls:
                     if on_tool_call:
                         await on_tool_call(tc.name, tc.input)
@@ -117,16 +117,24 @@ class AgentLoop:
                         await on_tool_result(tc.name, result.content, result.is_error)
                     context.add_tool_result(tc.id, result.content, is_error=result.is_error)
 
-            # 终止判断：无 tool_calls 时才可能终止
-            if not response.tool_calls:
+            # 终止判断
+            if response.stop_reason == "length":
+                # 输出被截断，内容不完整，不能当作成功
+                logger.warning(
+                    "output truncated by max_tokens run_id=%s step=%d",
+                    context.run_id, context.step,
+                )
+                context.mark_failed("output_truncated")
+            elif not response.tool_calls:
                 context.result = response.text or ""
                 context.mark_success()
             elif context.step >= context.max_steps:
                 context.mark_failed("exceeded_max_steps")
 
+            # 仅在追加完工具结果、且 run 继续时检查压缩，
+            # 此时 messages 末尾是 tool 结果，替换成 [摘要, ack] 对下次调用是合法输入
             if (
                 not context.is_done()
-                and response.stop_reason == "tool_calls"
                 and self._compactor is not None
                 and self._compact_threshold > 0
                 and response.usage is not None

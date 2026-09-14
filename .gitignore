@@ -8,6 +8,7 @@ dist/
 build/
 .eggs/
 uv.lock
+.ruff_cache
 
 # Virtual environments
 .venv/
@@ -25,6 +26,7 @@ src/minicode/.env
 
 # Session data
 .minicode/
+runs/
 
 # Reference project
 .example/

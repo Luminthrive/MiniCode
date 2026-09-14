@@ -20,6 +20,8 @@ class ExecutionContext:
     result: str = ""
     # subagent 角色可覆盖默认 system prompt
     system_prompt_override: str | None = None
+    # 本轮是否发生过上下文压缩（决定收尾时重写还是追加会话文件）
+    compacted: bool = False
 
     # 初始化消息历史，优先使用 session 完整回放内容
     def __post_init__(self) -> None:

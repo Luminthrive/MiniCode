@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -73,7 +72,10 @@ class SpawnAgentTool(BaseTool):
             },
             "subagent_type": {
                 "type": "string",
-                "description": "Agent role profile (planner/executor/reviewer). Leave empty for default.",
+                "description": (
+                    "Agent role profile (planner/executor/reviewer). "
+                    "Leave empty for default."
+                ),
             },
         },
         "required": ["description", "prompt"],
@@ -87,14 +89,12 @@ class SpawnAgentTool(BaseTool):
         parent_bus: EventBus,
         parent_run_id: str,
         max_steps: int,
-        runs_dir: Path,
         depth: int = 0,
     ) -> None:
         self._provider = provider
         self._parent_bus = parent_bus
         self._parent_run_id = parent_run_id
         self._max_steps = max_steps
-        self._runs_dir = runs_dir
         self._depth = depth
 
     # 派生子 agent，前台同步执行并返回结果
@@ -148,7 +148,7 @@ class SpawnAgentTool(BaseTool):
 
         try:
             await asyncio.wait_for(child_loop.run(child_context), timeout=600.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if not child_context.is_done():
                 child_context.mark_failed("timeout")
         except Exception:

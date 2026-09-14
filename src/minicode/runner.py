@@ -6,8 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from minicode.compact.compactor import Compactor
 from minicode.config import MiniConfig
@@ -43,7 +42,8 @@ class RunOutcome:
     status: str
     result: str
     reason: str | None
-    new_messages: list[dict[str, Any]]
+    # 本轮结束后的会话状态（含压缩后的形态），供调用方直接作为下一轮上下文
+    messages: list[dict[str, Any]]
 
 
 class AgentRunner:
@@ -67,7 +67,6 @@ class AgentRunner:
                 parent_bus=bus,
                 parent_run_id=run_id,
                 max_steps=max_steps,
-                runs_dir=Path("runs"),
                 depth=0,
             )
         )
@@ -99,6 +98,10 @@ class AgentRunner:
             prefill_messages=prefill_messages or [],
         )
 
+        # 压缩器会重新绑定 context.messages（而非原地修改），
+        # 先留存原列表引用，确保压缩触发后仍能取到完整本轮消息用于持久化
+        messages_log = context.messages
+
         await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
         cancelled = False
@@ -113,7 +116,8 @@ class AgentRunner:
                 provider=provider, bus=bus, run_id=run_id, max_steps=self._config.max_steps,
             )
 
-            session_dir = Path("runs") / run_id
+            # 摘要仅在有会话时落盘；一次性 run 无会话可恢复，不留档
+            session_dir = store.session_dir(session_id) if session_id and store else None
             compactor = Compactor(session_dir, session_id or "")
             permission_manager = PermissionManager()
             loop = AgentLoop(
@@ -122,7 +126,12 @@ class AgentRunner:
                 compact_threshold=self._config.compact_threshold,
                 permission_manager=permission_manager,
             )
-            await loop.run(context, on_delta=on_delta, on_tool_call=on_tool_call, on_tool_result=on_tool_result)
+            await loop.run(
+                context,
+                on_delta=on_delta,
+                on_tool_call=on_tool_call,
+                on_tool_result=on_tool_result,
+            )
         except asyncio.CancelledError:
             cancelled = True
             if not context.is_done():
@@ -132,10 +141,22 @@ class AgentRunner:
             if not context.is_done():
                 context.mark_failed("llm_error")
 
-        await bus.publish(RunFinishedEvent(run_id=run_id, status=context.status, reason=context.reason, steps=context.step, ts=_now()))
+        await bus.publish(
+            RunFinishedEvent(
+                run_id=run_id,
+                status=context.status,
+                reason=context.reason,
+                steps=context.step,
+                ts=_now(),
+            )
+        )
 
+        # 压缩过则整体重写会话文件（原文件备份为 .bak），否则只追加本轮新消息
         if session_id and store:
-            store.append_messages(session_id, context.messages[prefill_len:], run_id=run_id)
+            if context.compacted:
+                store.rewrite_messages(session_id, context.messages, run_id=run_id)
+            else:
+                store.append_messages(session_id, messages_log[prefill_len:], run_id=run_id)
 
         if cancelled:
             raise asyncio.CancelledError()
@@ -144,5 +165,5 @@ class AgentRunner:
             status=context.status,
             result=context.result,
             reason=context.reason,
-            new_messages=context.messages[prefill_len:],
+            messages=list(context.messages),
         )

@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from minicode.context import ExecutionContext
@@ -57,8 +57,8 @@ class CompactionResult:
 
 # 上下文压缩器：将长对话压缩为6段摘要
 class Compactor:
-    # 初始化压缩器，绑定 session 目录和 session ID
-    def __init__(self, session_dir: Path, session_id: str) -> None:
+    # 初始化压缩器；session_dir 为 None 时不落盘摘要（一次性 run 无会话可恢复）
+    def __init__(self, session_dir: Path | None, session_id: str) -> None:
         self._session_dir = session_dir
         self._session_id = session_id
 
@@ -77,7 +77,9 @@ class Compactor:
             {"role": "user", "content": result.summary_text},
             {"role": "assistant", "content": "Understood, I'll continue from this summary."},
         ]
-        self._write_summary(result.summary_text)
+        # 标记本轮发生压缩，收尾时 runner 据此重写会话文件而非追加
+        context.compacted = True
+        # self._write_summary(result.summary_text)
         logger.info(
             "context compacted session=%s run=%s original≈%d summary=%d tokens",
             self._session_id, context.run_id,
@@ -130,8 +132,10 @@ class Compactor:
             summary_tokens=summary_tokens,
         )
 
-    # 将摘要文本写入 session 目录的 summary_<ts>.md
+    # 将摘要文本写入 session 目录的 summary_<ts>.md；无会话目录时跳过
     def _write_summary(self, text: str) -> None:
+        if self._session_dir is None:
+            return
         try:
             self._session_dir.mkdir(parents=True, exist_ok=True)
             path = self._session_dir / f"summary_{_ts_compact()}.md"
