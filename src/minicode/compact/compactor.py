@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -42,11 +40,6 @@ Be concise. Omit reasoning steps and intermediate attempts. Keep conclusions.\
 """
 
 
-# 返回当前 UTC 时间的简短时间戳字符串（用于文件名）
-def _ts_compact() -> str:
-    return datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-
-
 # 压缩结果数据类
 @dataclass
 class CompactionResult:
@@ -57,9 +50,8 @@ class CompactionResult:
 
 # 上下文压缩器：将长对话压缩为6段摘要
 class Compactor:
-    # 初始化压缩器；session_dir 为 None 时不落盘摘要（一次性 run 无会话可恢复）
-    def __init__(self, session_dir: Path | None, session_id: str) -> None:
-        self._session_dir = session_dir
+    # 初始化压缩器，记录 session ID 用于日志
+    def __init__(self, session_id: str = "") -> None:
         self._session_id = session_id
 
     # 压缩 ExecutionContext.messages，就地替换消息列表并写 summary 文件
@@ -79,7 +71,6 @@ class Compactor:
         ]
         # 标记本轮发生压缩，收尾时 runner 据此重写会话文件而非追加
         context.compacted = True
-        # self._write_summary(result.summary_text)
         logger.info(
             "context compacted session=%s run=%s original≈%d summary=%d tokens",
             self._session_id, context.run_id,
@@ -132,37 +123,30 @@ class Compactor:
             summary_tokens=summary_tokens,
         )
 
-    # 将摘要文本写入 session 目录的 summary_<ts>.md；无会话目录时跳过
-    def _write_summary(self, text: str) -> None:
-        if self._session_dir is None:
-            return
-        try:
-            self._session_dir.mkdir(parents=True, exist_ok=True)
-            path = self._session_dir / f"summary_{_ts_compact()}.md"
-            path.write_text(text, encoding="utf-8")
-        except Exception:
-            logger.exception("compactor: failed to write summary file")
-
 
 # 将消息列表序列化为可供 LLM 阅读的纯文本（OpenAI 格式）
 def _messages_to_text(messages: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for msg in messages:
         role = msg.get("role", "unknown").upper()
-        content = msg.get("content") or ""
-        tool_calls = msg.get("tool_calls")
+        content = str(msg.get("content") or "")
         tool_call_id = msg.get("tool_call_id")
 
         chunks: list[str] = []
         if role == "TOOL" and tool_call_id:
+            # 工具结果用成对标签包住内容，便于摘要模型分辨边界
             chunks.append(f"<tool_result id={tool_call_id}>")
-        if content:
-            chunks.append(str(content))
-        for tc in tool_calls or []:
-            func = tc.get("function", {})
-            chunks.append(
-                f"<tool_call name={func.get('name')} id={tc.get('id')}>\n"
-                f"{func.get('arguments', '{}')}\n</tool_call>"
-            )
+            if content:
+                chunks.append(content)
+            chunks.append("</tool_result>")
+        else:
+            if content:
+                chunks.append(content)
+            for tc in msg.get("tool_calls") or []:
+                func = tc.get("function", {})
+                chunks.append(
+                    f"<tool_call name={func.get('name')} id={tc.get('id')}>\n"
+                    f"{func.get('arguments', '{}')}\n</tool_call>"
+                )
         parts.append(f"[{role}]\n" + "\n".join(chunks))
     return "\n\n".join(parts)

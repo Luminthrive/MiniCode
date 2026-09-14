@@ -41,6 +41,7 @@ class AgentLoop:
         on_delta: DeltaCallback | None = None,
         on_tool_call: Any | None = None,
         on_tool_result: Any | None = None,
+        on_compact: Any | None = None,
     ) -> None:
         import json as _json
         while not context.is_done():
@@ -140,4 +141,8 @@ class AgentLoop:
                 and response.usage is not None
                 and response.usage.context_pct >= self._compact_threshold
             ):
-                await self._compactor.compact(context, self._provider)
+                compacted = await self._compactor.compact(context, self._provider)
+                if compacted is not None and on_compact:
+                    await on_compact(
+                        compacted.original_token_estimate, compacted.summary_tokens
+                    )

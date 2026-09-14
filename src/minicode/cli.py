@@ -107,6 +107,18 @@ def _make_tool_result_printer() -> Any:
     return on_tool_result
 
 
+# 压缩提示：上下文被压缩时显示前后的 token 估算
+def _make_compact_printer() -> Any:
+    """创建上下文压缩回调"""
+    async def on_compact(original_tokens: int, summary_tokens: int) -> None:
+        console.print(
+            f"  [bold magenta]📦[/] [dim]context compacted: "
+            f"{original_tokens:,} → {summary_tokens:,} tokens[/]",
+            highlight=False,
+        )
+    return on_compact
+
+
 def _run_command(goal: str) -> None:
     """执行一次 agent run"""
     from minicode.config import get_config
@@ -125,6 +137,7 @@ def _run_command(goal: str) -> None:
         on_delta=on_delta,
         on_tool_call=_make_tool_call_printer(),
         on_tool_result=_make_tool_result_printer(),
+        on_compact=_make_compact_printer(),
     ))
 
     elapsed = time.time() - t0
@@ -198,6 +211,7 @@ def _chat_command(session_id: str = "default") -> None:
             on_delta=on_delta,
             on_tool_call=_make_tool_call_printer(),
             on_tool_result=_make_tool_result_printer(),
+            on_compact=_make_compact_printer(),
         ))
         elapsed = time.time() - t0
 

@@ -84,6 +84,7 @@ class AgentRunner:
         on_delta: DeltaCallback | None = None,
         on_tool_call: Any | None = None,
         on_tool_result: Any | None = None,
+        on_compact: Any | None = None,
     ) -> RunOutcome:
         run_id = run_id or _new_run_id()
         prefill_len = len(prefill_messages) if prefill_messages else 0
@@ -116,9 +117,7 @@ class AgentRunner:
                 provider=provider, bus=bus, run_id=run_id, max_steps=self._config.max_steps,
             )
 
-            # 摘要仅在有会话时落盘；一次性 run 无会话可恢复，不留档
-            session_dir = store.session_dir(session_id) if session_id and store else None
-            compactor = Compactor(session_dir, session_id or "")
+            compactor = Compactor(session_id or "")
             permission_manager = PermissionManager()
             loop = AgentLoop(
                 provider, registry,
@@ -131,6 +130,7 @@ class AgentRunner:
                 on_delta=on_delta,
                 on_tool_call=on_tool_call,
                 on_tool_result=on_tool_result,
+                on_compact=on_compact,
             )
         except asyncio.CancelledError:
             cancelled = True
