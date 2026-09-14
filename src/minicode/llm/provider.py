@@ -79,13 +79,25 @@ class OpenAIProvider:
         usage: UsageStats | None = None
         stop_reason = "stop"
         tc_buffer: dict[int, dict[str, Any]] = {}
+        # 思考模型的思考增量：不回传给用户，但要留存以便回传 API
+        reasoning_parts: list[str] = []
 
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 async with self._client.stream("POST", "/chat/completions", json=payload) as resp:
                     if resp.status_code != 200:
-                        await resp.aread()
-                        raise httpx.HTTPStatusError("error", request=resp.request, response=resp)
+                        # 保留响应体，否则调用方只能看到无信息的 "error"
+                        raw = await resp.aread()
+                        body = raw.decode("utf-8", errors="replace")[:500]
+                        logger.error(
+                            "LLM API %d error run_id=%s body=%s",
+                            resp.status_code, run_id, body,
+                        )
+                        raise httpx.HTTPStatusError(
+                            f"HTTP {resp.status_code}: {body}",
+                            request=resp.request,
+                            response=resp,
+                        )
 
                     async for raw_line in resp.aiter_lines():
                         if not raw_line.startswith("data: "):
@@ -123,6 +135,11 @@ class OpenAIProvider:
                                 stop_reason = "length"
                             else:
                                 stop_reason = "stop"
+
+                        # 思考模型的思考增量：不回传给用户，但要留存以便回传 API
+                        rc_delta = delta.get("reasoning_content")
+                        if rc_delta:
+                            reasoning_parts.append(rc_delta)
 
                         text_delta = delta.get("content", "")
                         if text_delta:
@@ -188,6 +205,7 @@ class OpenAIProvider:
             tool_calls=tool_calls,
             text="".join(text_parts),
             usage=usage,
+            reasoning="".join(reasoning_parts),
         )
 
     async def close(self) -> None:

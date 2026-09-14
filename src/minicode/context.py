@@ -41,6 +41,7 @@ class ExecutionContext:
         self,
         text: str,
         tool_calls: list[dict[str, Any]] | None = None,
+        reasoning: str = "",
     ) -> None:
         msg: dict[str, Any] = {"role": "assistant"}
         if tool_calls:
@@ -48,6 +49,9 @@ class ExecutionContext:
             msg["tool_calls"] = tool_calls
         else:
             msg["content"] = text
+        # 统一带上该字段：思考模型要求它存在（空串即可），
+        # 形状统一也避免中途切换模型后历史消息缺字段而被拒
+        msg["reasoning_content"] = reasoning
         self.messages.append(msg)
 
     # 将工具调用结果追加为 role=tool 消息（OpenAI 格式）

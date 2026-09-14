@@ -103,7 +103,9 @@ class AgentLoop:
                     }
                     for tc in response.tool_calls
                 ]
-            context.add_assistant_message(response.text, openai_tool_calls)
+            context.add_assistant_message(
+                response.text, openai_tool_calls, response.reasoning
+            )
 
             # 有 tool_calls 就必须执行；但输出被 max_tokens 截断时参数可能是残缺 JSON，不执行
             if response.tool_calls and response.stop_reason != "length":

@@ -77,11 +77,12 @@ class SessionStore:
                     "role": role,
                     "run_id": run_id,
                 }
-                # assistant 消息可能包含 tool_calls
+                # assistant 消息可能包含 tool_calls 与思考内容
                 if role == "assistant":
                     row["content"] = msg.get("content", "")
                     if msg.get("tool_calls"):
                         row["tool_calls"] = msg["tool_calls"]
+                    row["reasoning_content"] = msg.get("reasoning_content", "")
                 # tool 消息包含 tool_call_id
                 elif role == "tool":
                     row["tool_call_id"] = msg.get("tool_call_id", "")
@@ -131,6 +132,8 @@ class SessionStore:
                 msg["content"] = row.get("content", "")
                 if row.get("tool_calls"):
                     msg["tool_calls"] = row["tool_calls"]
+                # 旧记录缺该字段时补空串，使历史消息在切换模型后仍可回放
+                msg["reasoning_content"] = row.get("reasoning_content", "")
             elif role == "tool":
                 msg["tool_call_id"] = row.get("tool_call_id", "")
                 msg["content"] = row.get("content", "")

@@ -28,3 +28,5 @@ class LlmResponse:
     tool_calls: list[ToolCallBlock] = field(default_factory=list)
     text: str = ""
     usage: UsageStats | None = None
+    # 思考模型的 reasoning_content；无此概念的模型为空串，回传时统一带上该字段
+    reasoning: str = ""
