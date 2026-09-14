@@ -23,12 +23,12 @@ class ExecutionContext:
     # 本轮是否发生过上下文压缩（决定收尾时重写还是追加会话文件）
     compacted: bool = False
 
-    # 初始化消息历史，优先使用 session 完整回放内容
+    # 初始化消息历史：历史回放在前，本轮目标始终作为新的 user 消息追加在后
     def __post_init__(self) -> None:
         if self.prefill_messages:
             self.messages = [dict(m) for m in self.prefill_messages]
-        elif not self.messages:
-            self.messages.append({"role": "user", "content": self.goal})
+        # 不能写成 elif：有历史时也要追加本轮目标，否则模型看不到新问题
+        self.messages.append({"role": "user", "content": self.goal})
 
     # 返回当前 run 的 system prompt；有 override 时跳过 base
     def system_prompt(self, base: str) -> str:
