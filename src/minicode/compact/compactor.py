@@ -140,29 +140,25 @@ class Compactor:
             logger.exception("compactor: failed to write summary file")
 
 
-# 将消息列表序列化为可供 LLM 阅读的纯文本
+# 将消息列表序列化为可供 LLM 阅读的纯文本（OpenAI 格式）
 def _messages_to_text(messages: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for msg in messages:
         role = msg.get("role", "unknown").upper()
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            parts.append(f"[{role}]\n{content}")
-        elif isinstance(content, list):
-            blocks: list[str] = []
-            for block in content:
-                btype = block.get("type", "")
-                if btype == "text":
-                    blocks.append(block.get("text", ""))
-                elif btype == "tool_use":
-                    blocks.append(
-                        f"<tool_call name={block.get('name')} id={block.get('id')}>\n"
-                        f"{block.get('input', {})}\n</tool_call>"
-                    )
-                elif btype == "tool_result":
-                    blocks.append(
-                        f"<tool_result id={block.get('tool_use_id')}>\n"
-                        f"{block.get('content', '')}\n</tool_result>"
-                    )
-            parts.append(f"[{role}]\n" + "\n".join(blocks))
+        content = msg.get("content") or ""
+        tool_calls = msg.get("tool_calls")
+        tool_call_id = msg.get("tool_call_id")
+
+        chunks: list[str] = []
+        if role == "TOOL" and tool_call_id:
+            chunks.append(f"<tool_result id={tool_call_id}>")
+        if content:
+            chunks.append(str(content))
+        for tc in tool_calls or []:
+            func = tc.get("function", {})
+            chunks.append(
+                f"<tool_call name={func.get('name')} id={tc.get('id')}>\n"
+                f"{func.get('arguments', '{}')}\n</tool_call>"
+            )
+        parts.append(f"[{role}]\n" + "\n".join(chunks))
     return "\n\n".join(parts)
