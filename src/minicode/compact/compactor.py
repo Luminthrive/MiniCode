@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 压缩时原样保留的最近消息条数：刚拿到的工具结果不该被摘要抹掉，否则模型会重复读文件
+_KEEP_RECENT = 4
+
 _COMPACT_PROMPT = """\
 You are compressing an agent conversation into a handoff summary.
 Another LLM instance will continue this task from your summary alone — make it complete.
@@ -54,21 +57,26 @@ class Compactor:
     def __init__(self, session_id: str = "") -> None:
         self._session_id = session_id
 
-    # 压缩 ExecutionContext.messages，就地替换消息列表并写 summary 文件
+    # 压缩 ExecutionContext.messages：旧消息换成摘要，最近若干条原样保留
     async def compact(
         self,
         context: ExecutionContext,
         provider: LLMProvider,
         focus: str = "",
     ) -> CompactionResult | None:
-        result = await self.compact_messages(context.messages, provider, focus=focus)
+        split = self._split_index(context.messages)
+        head, tail = context.messages[:split], context.messages[split:]
+        if not head:
+            return None
+
+        result = await self.compact_messages(head, provider, focus=focus)
         if result is None:
             return None
 
         context.messages = [
             {"role": "user", "content": result.summary_text},
             {"role": "assistant", "content": "Understood, I'll continue from this summary."},
-        ]
+        ] + [dict(m) for m in tail]
         # 标记本轮发生压缩，收尾时 runner 据此重写会话文件而非追加
         context.compacted = True
         logger.info(
@@ -78,6 +86,14 @@ class Compactor:
         )
         return result
 
+    # 计算压缩切分点：保留最近 _KEEP_RECENT 条，且不切断 tool_calls 与 tool 结果的配对
+    def _split_index(self, messages: list[dict[str, Any]]) -> int:
+        split = max(0, len(messages) - _KEEP_RECENT)
+        # 若切在工具结果中间，这些 tool 消息会失去对应的 assistant tool_calls，API 会拒绝
+        while split < len(messages) and messages[split].get("role") == "tool":
+            split += 1
+        return split
+
     # 纯函数式压缩：接收消息列表，返回 CompactionResult；失败时返回 None
     async def compact_messages(
         self,
@@ -85,9 +101,7 @@ class Compactor:
         provider: LLMProvider,
         focus: str = "",
     ) -> CompactionResult | None:
-        original_estimate = sum(
-            len(str(m.get("content", ""))) for m in messages
-        ) // 4
+        original_estimate = _estimate_tokens(messages)
 
         history_text = _messages_to_text(messages)
         prompt = _COMPACT_PROMPT
@@ -122,6 +136,18 @@ class Compactor:
             original_token_estimate=original_estimate,
             summary_tokens=summary_tokens,
         )
+
+
+# 粗略估算消息列表的 token 数：content 与 tool_calls 参数都计入，按字符数 / 4 折算
+def _estimate_tokens(messages: list[dict[str, Any]]) -> int:
+    chars = 0
+    for msg in messages:
+        chars += len(str(msg.get("content") or ""))
+        for tc in msg.get("tool_calls") or []:
+            func = tc.get("function", {})
+            chars += len(str(func.get("name", "")))
+            chars += len(str(func.get("arguments", "")))
+    return chars // 4
 
 
 # 将消息列表序列化为可供 LLM 阅读的纯文本（OpenAI 格式）
