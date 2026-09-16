@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -101,9 +102,10 @@ class Compactor:
         provider: LLMProvider,
         focus: str = "",
     ) -> CompactionResult | None:
-        original_estimate = _estimate_tokens(messages)
+        # 纯 CPU 的全量序列化/估算，大上下文时耗时可观，丢线程池避免阻塞事件循环
+        original_estimate = await asyncio.to_thread(_estimate_tokens, messages)
 
-        history_text = _messages_to_text(messages)
+        history_text = await asyncio.to_thread(_messages_to_text, messages)
         prompt = _COMPACT_PROMPT
         if focus.strip():
             prompt += f"\n\nIMPORTANT: Pay special attention to: {focus.strip()}"

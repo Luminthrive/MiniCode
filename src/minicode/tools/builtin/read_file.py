@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,7 @@ class ReadFileTool(BaseTool):
             return ToolResult(content=safety_error, is_error=True, error_type="permission_denied")
 
         path = Path(path_str)
-        raw = path.read_bytes()
+        raw = await asyncio.to_thread(path.read_bytes)
         truncated = len(raw) > _MAX_BYTES
         text = raw[:_MAX_BYTES].decode("utf-8", errors="replace")
         if truncated:

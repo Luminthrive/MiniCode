@@ -111,7 +111,8 @@ class SpawnAgentTool(BaseTool):
 
         profile: AgentProfile | None = None
         if p.subagent_type:
-            profile = _profile_loader.load(p.subagent_type)
+            # TOML 读取为同步磁盘 IO，丢线程池避免阻塞事件循环
+            profile = await asyncio.to_thread(_profile_loader.load, p.subagent_type)
 
         child_run_id = _new_run_id()
         # planner 5步够用，executor 需要更多步（读文件+分析+写报告）

@@ -151,12 +151,17 @@ class AgentRunner:
             )
         )
 
-        # 压缩过则整体重写会话文件（原文件备份为 .bak），否则只追加本轮新消息
+        # 压缩过则整体重写会话文件（原文件备份为 .bak），否则只追加本轮新消息；
+        # 磁盘 IO 丢线程池执行，避免阻塞事件循环
         if session_id and store:
             if context.compacted:
-                store.rewrite_messages(session_id, context.messages, run_id=run_id)
+                await asyncio.to_thread(
+                    store.rewrite_messages, session_id, context.messages, run_id=run_id
+                )
             else:
-                store.append_messages(session_id, messages_log[prefill_len:], run_id=run_id)
+                await asyncio.to_thread(
+                    store.append_messages, session_id, messages_log[prefill_len:], run_id=run_id
+                )
 
         if cancelled:
             raise asyncio.CancelledError()

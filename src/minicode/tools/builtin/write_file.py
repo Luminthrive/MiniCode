@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,12 @@ from pydantic import BaseModel, ConfigDict
 from minicode.tools.base import BaseTool, ToolResult, check_path_safety
 
 _MAX_BYTES = 1 * 1024 * 1024  # 1 MB
+
+
+# 同步写盘（建父目录 + 写入）：经 asyncio.to_thread 调用，避免阻塞事件循环
+def _write_sync(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 # 写入文件参数模型
@@ -63,7 +70,6 @@ class WriteFileTool(BaseTool):
             )
 
         path = Path(path_str)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        await asyncio.to_thread(_write_sync, path, content)
 
         return ToolResult(content=f"wrote {len(encoded)} bytes to {path_str}")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -61,26 +62,32 @@ class ListDirTool(BaseTool):
         if not root.is_dir():
             raise NotADirectoryError(f"not a directory: {path_str}")
 
-        lines: list[str] = [str(root) + "/"]
-        count = 0
-
-        # 递归遍历目录并生成树状结构
-        def _walk(directory: Path, depth: int, prefix: str) -> None:
-            nonlocal count
-            if depth > max_depth or count >= _MAX_ENTRIES:
-                return
-            entries = sorted(directory.iterdir(), key=lambda e: (e.is_file(), e.name))
-            for i, entry in enumerate(entries):
-                if count >= _MAX_ENTRIES:
-                    lines.append(f"{prefix}... (truncated)")
-                    return
-                connector = "└── " if i == len(entries) - 1 else "├── "
-                suffix = "/" if entry.is_dir() else ""
-                lines.append(f"{prefix}{connector}{entry.name}{suffix}")
-                count += 1
-                if entry.is_dir() and depth < max_depth:
-                    extension = "    " if i == len(entries) - 1 else "│   "
-                    _walk(entry, depth + 1, prefix + extension)
-
-        _walk(root, 1, "")
+        # 递归遍历为同步磁盘 IO，丢线程池执行，避免阻塞事件循环
+        lines = await asyncio.to_thread(_walk_tree, root, max_depth)
         return ToolResult(content="\n".join(lines))
+
+
+# 递归遍历目录并生成树状结构（同步磁盘 IO，经 asyncio.to_thread 调用）
+def _walk_tree(root: Path, max_depth: int) -> list[str]:
+    lines: list[str] = [str(root) + "/"]
+    count = 0
+
+    def _walk(directory: Path, depth: int, prefix: str) -> None:
+        nonlocal count
+        if depth > max_depth or count >= _MAX_ENTRIES:
+            return
+        entries = sorted(directory.iterdir(), key=lambda e: (e.is_file(), e.name))
+        for i, entry in enumerate(entries):
+            if count >= _MAX_ENTRIES:
+                lines.append(f"{prefix}... (truncated)")
+                return
+            connector = "└── " if i == len(entries) - 1 else "├── "
+            suffix = "/" if entry.is_dir() else ""
+            lines.append(f"{prefix}{connector}{entry.name}{suffix}")
+            count += 1
+            if entry.is_dir() and depth < max_depth:
+                extension = "    " if i == len(entries) - 1 else "│   "
+                _walk(entry, depth + 1, prefix + extension)
+
+    _walk(root, 1, "")
+    return lines
