@@ -20,6 +20,8 @@ from minicode.events.bus import (
     EventBus,
     LlmDeltaEvent,
     LlmUsageEvent,
+    RunFinishedEvent,
+    RunStartedEvent,
     SubagentFinishedEvent,
     SubagentStartedEvent,
     ToolCallEvent,
@@ -52,6 +54,8 @@ def main() -> None:
     run_parser.add_argument("goal", help="Task description")
     chat_parser = subparsers.add_parser("chat", help="交互式聊天模式")
     chat_parser.add_argument("-s", "--session", default="default", help="会话 ID（默认 default）")
+    replay_parser = subparsers.add_parser("replay", help="离线回放一次历史 trace（不调用 LLM）")
+    replay_parser.add_argument("trace_id", help="Trace ID（.minicode/traces 下的目录名）")
     args = parser.parse_args()
     _setup_logging(args.verbose)
 
@@ -59,6 +63,8 @@ def main() -> None:
         _run_command(args.goal)
     elif args.command == "chat":
         _chat_command(session_id=args.session)
+    elif args.command == "replay":
+        _replay_command(args.trace_id)
     else:
         parser.print_help()
 
@@ -255,3 +261,46 @@ def _chat_command(session_id: str = "default") -> None:
 
         # 落盘由 runner 负责；这里只需同步内存中的会话状态
         history = outcome.messages
+
+
+def _replay_command(trace_id: str) -> None:
+    """离线回放历史 trace：读取 events.jsonl 重新交给 EventPrinter 渲染（不调用 LLM）"""
+    import asyncio
+    from pathlib import Path
+
+    from minicode.events.replay import TraceReadError, read_trace
+
+    path = Path(".minicode/traces") / trace_id / "events.jsonl"
+    if not path.exists():
+        console.print(f"[red]trace 不存在: {trace_id}[/red]（未找到 {path}）")
+        sys.exit(1)
+
+    try:
+        events = read_trace(path)
+    except TraceReadError as e:
+        console.print(f"[red]trace 文件损坏: {e}[/red]")
+        sys.exit(1)
+
+    # 头尾信息由命令层展示（与实时 run 的 Goal 面板/状态行同风格）
+    started = next((e for e in events if isinstance(e, RunStartedEvent)), None)
+    finished = next((e for e in events if isinstance(e, RunFinishedEvent)), None)
+    goal = started.goal if started else "(未知)"
+    status = finished.status if finished else "unknown"
+    steps = finished.steps if finished else 0
+
+    console.print()
+    console.print(Panel(goal, title=f"[bold]Trace {trace_id}[/bold]", border_style="blue"))
+
+    # 逐条重发到临时总线，零改动复用 EventPrinter 的渲染逻辑
+    bus = EventBus()
+    EventPrinter(bus)
+
+    async def _replay() -> None:
+        for event in events:
+            await bus.publish(event)
+
+    asyncio.run(_replay())
+
+    console.print()
+    status_style = "bold green" if status == "success" else "bold red"
+    console.print(f"[{status_style}][replay] {status} · {steps} steps[/]", highlight=False)
