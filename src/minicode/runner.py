@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING, Any
 from minicode.compact.compactor import Compactor
 from minicode.config import MiniConfig
 from minicode.context import ExecutionContext
-from minicode.events.bus import EventBus, RunFinishedEvent, RunStartedEvent
+from minicode.events.bus import (
+    EventBus,
+    RunFinishedEvent,
+    RunStartedEvent,
+    utc_now_iso,
+)
 from minicode.llm.provider import OpenAIProvider
 from minicode.loop import AgentLoop
 from minicode.session.store import SessionStore
@@ -24,13 +29,9 @@ from minicode.tools.permissions import PermissionManager
 from minicode.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from minicode.llm.base import DeltaCallback, LLMProvider
+    from minicode.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def _new_run_id() -> str:
@@ -47,8 +48,10 @@ class RunOutcome:
 
 
 class AgentRunner:
-    def __init__(self, config: MiniConfig) -> None:
+    # bus 可由外部注入（CLI 预先订阅事件），未注入时每次 run 自建
+    def __init__(self, config: MiniConfig, bus: EventBus | None = None) -> None:
         self._config = config
+        self._bus = bus
 
     def _build_registry(
         self,
@@ -81,15 +84,11 @@ class AgentRunner:
         store: SessionStore | None = None,
         system_prompt_override: str | None = None,
         prefill_messages: list[dict[str, Any]] | None = None,
-        on_delta: DeltaCallback | None = None,
-        on_tool_call: Any | None = None,
-        on_tool_result: Any | None = None,
-        on_compact: Any | None = None,
     ) -> RunOutcome:
         run_id = run_id or _new_run_id()
         prefill_len = len(prefill_messages) if prefill_messages else 0
 
-        bus = EventBus()
+        bus = self._bus if self._bus is not None else EventBus()
 
         context = ExecutionContext(
             run_id=run_id,
@@ -103,7 +102,7 @@ class AgentRunner:
         # 先留存原列表引用，确保压缩触发后仍能取到完整本轮消息用于持久化
         messages_log = context.messages
 
-        await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
+        await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=utc_now_iso()))
 
         cancelled = False
         try:
@@ -120,18 +119,12 @@ class AgentRunner:
             compactor = Compactor(session_id or "")
             permission_manager = PermissionManager()
             loop = AgentLoop(
-                provider, registry,
+                provider, registry, bus,
                 compactor=compactor,
                 compact_threshold=self._config.compact_threshold,
                 permission_manager=permission_manager,
             )
-            await loop.run(
-                context,
-                on_delta=on_delta,
-                on_tool_call=on_tool_call,
-                on_tool_result=on_tool_result,
-                on_compact=on_compact,
-            )
+            await loop.run(context)
         except asyncio.CancelledError:
             cancelled = True
             if not context.is_done():
@@ -147,7 +140,7 @@ class AgentRunner:
                 status=context.status,
                 reason=context.reason,
                 steps=context.step,
-                ts=_now(),
+                ts=utc_now_iso(),
             )
         )
 

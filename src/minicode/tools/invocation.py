@@ -32,11 +32,21 @@ async def invoke_tool(
     permission_manager: PermissionManager | None = None,
 ) -> ToolResult:
     t0 = time.monotonic()
+    result = await _invoke_with_retries(
+        registry, tool_call, run_id, timeout, permission_manager
+    )
+    result.elapsed_ms = int((time.monotonic() - t0) * 1000)
+    return result
 
-    # 计算从调用开始到现在的毫秒数
-    def elapsed() -> int:
-        return int((time.monotonic() - t0) * 1000)
 
+# 实际执行逻辑：未知工具/权限/参数校验快速失败，调用超时与异常按退避重试
+async def _invoke_with_retries(
+    registry: ToolRegistry,
+    tool_call: ToolCallBlock,
+    run_id: str,
+    timeout: float,
+    permission_manager: PermissionManager | None,
+) -> ToolResult:
     tool = registry.get(tool_call.name)
     if tool is None:
         return ToolResult(

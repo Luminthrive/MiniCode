@@ -13,7 +13,7 @@ import httpx
 from minicode.llm.types import LlmResponse, ToolCallBlock, UsageStats
 
 if TYPE_CHECKING:
-    from minicode.llm.base import DeltaCallback
+    from minicode.llm.base import DeltaSink
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class OpenAIProvider:
         *,
         step: int = 0,
         system: str | None = None,
-        on_delta: DeltaCallback | None = None,
+        delta_sink: DeltaSink | None = None,
     ) -> LlmResponse:
         payload: dict[str, Any] = {
             "model": self._model,
@@ -60,15 +60,15 @@ class OpenAIProvider:
         # 始终使用流式调用
         async def _noop(text: str) -> None:
             pass
-        _fn = on_delta or _noop
+        _fn = delta_sink or _noop
         return await self._chat_stream(payload, run_id, _fn)
 
-    # 流式调用 API，逐片段回调文本，累积工具调用后返回完整响应
+    # 流式调用 API，逐片段送达文本，累积工具调用后返回完整响应
     async def _chat_stream(
         self,
         payload: dict[str, Any],
         run_id: str,
-        on_delta: DeltaCallback,
+        delta_sink: DeltaSink,
     ) -> LlmResponse:
         payload["stream"] = True
         logger.debug("LLM stream request: model=%s msgs=%d tools=%d",
@@ -144,7 +144,7 @@ class OpenAIProvider:
                         text_delta = delta.get("content", "")
                         if text_delta:
                             text_parts.append(text_delta)
-                            await on_delta(text_delta)
+                            await delta_sink(text_delta)
 
                         for tc_delta in delta.get("tool_calls") or []:
                             idx = tc_delta.get("index", 0)

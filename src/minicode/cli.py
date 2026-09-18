@@ -10,10 +10,21 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import BaseModel
 from rich.console import Console
 from rich.panel import Panel
 
 from minicode import __version__
+from minicode.events.bus import (
+    ContextCompactedEvent,
+    EventBus,
+    LlmDeltaEvent,
+    LlmUsageEvent,
+    SubagentFinishedEvent,
+    SubagentStartedEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 
 console = Console()
 
@@ -56,67 +67,90 @@ def main() -> None:
 def _summarize_args(name: str, args: dict[str, Any]) -> str:
     """生成工具参数的单行摘要"""
     if name == "read_file":
-        return args.get("path", "?")
+        return str(args.get("path", "?"))
     elif name == "write_file":
-        return args.get("path", "?")
+        return str(args.get("path", "?"))
     elif name == "bash":
-        cmd = args.get("command", "?")
+        cmd = str(args.get("command", "?"))
         return cmd[:50] + ("..." if len(cmd) > 50 else "")
     elif name == "list_dir":
-        return args.get("path", ".")
+        return str(args.get("path", "."))
     elif name == "spawn_agent":
-        return args.get("subagent_type", "default")
+        return str(args.get("subagent_type", "default"))
     else:
         return str(args)[:40]
 
 
-# 流式文本收集器：边收边打印
-def _make_delta_collector() -> tuple[Any, list[str]]:
-    """创建流式文本回调，实时打印并累积"""
-    buf: list[str] = []
+# 事件打印器：订阅 EventBus，将运行中的各类事件渲染到终端
+class EventPrinter:
+    def __init__(self, bus: EventBus) -> None:
+        self._inline = False  # 上一条 llm.delta 之后尚未换行
+        self._subagents: dict[str, str] = {}  # child_run_id -> description
+        bus.subscribe(self.handle)
 
-    async def on_delta(text: str) -> None:
-        buf.append(text)
-        console.print(text, end="", highlight=False)
+    # 补一个换行，避免后续事件行接在未结束的流式文本后半行
+    def _ensure_newline(self) -> None:
+        if self._inline:
+            console.print()
+            self._inline = False
 
-    return on_delta, buf
+    # 判断事件是否来自子 agent（决定缩进层级）
+    def _is_child(self, event: BaseModel) -> bool:
+        if getattr(event, "parent_run_id", None) is not None:
+            return True
+        return event.run_id in self._subagents  # type: ignore[attr-defined]
 
+    async def handle(self, event: BaseModel) -> None:
+        if isinstance(event, LlmDeltaEvent):
+            # 前台模式下父与子 agent 不会同时流式输出，token 原样追加即可
+            console.print(event.text, end="", highlight=False)
+            self._inline = True
+            return
 
-# 工具调用展示：单行
-def _make_tool_call_printer() -> Any:
-    """创建工具调用回调"""
-    async def on_tool_call(name: str, args: dict[str, Any]) -> None:
-        summary = _summarize_args(name, args)
-        console.print()  # 确保工具调用另起一行
-        console.print(f"  [bold yellow]⚡[/] [cyan]{name}[/]([dim]{summary}[/])", highlight=False)
-    return on_tool_call
+        self._ensure_newline()
+        indent = "      " if self._is_child(event) else "  "
 
-
-# 工具结果展示：单行
-def _make_tool_result_printer() -> Any:
-    """创建工具结果回调"""
-    async def on_tool_result(name: str, content: str, is_error: bool) -> None:
-        if is_error:
-            tag = "[bold red]✗[/]"
-        else:
-            tag = "[bold green]✓[/]"
-        preview = content[:60].replace("\n", " ").strip()
-        if len(content) > 60:
-            preview += "..."
-        console.print(f"    {tag} [dim]{preview}[/]", highlight=False)
-    return on_tool_result
-
-
-# 压缩提示：上下文被压缩时显示前后的 token 估算
-def _make_compact_printer() -> Any:
-    """创建上下文压缩回调"""
-    async def on_compact(original_tokens: int, summary_tokens: int) -> None:
-        console.print(
-            f"  [bold magenta]📦[/] [dim]context compacted: "
-            f"{original_tokens:,} → {summary_tokens:,} tokens[/]",
-            highlight=False,
-        )
-    return on_compact
+        if isinstance(event, ToolCallEvent):
+            summary = _summarize_args(event.tool_name, dict(event.args))
+            console.print(
+                f"{indent}[bold yellow]⚡[/] [cyan]{event.tool_name}[/]([dim]{summary}[/])",
+                highlight=False,
+            )
+        elif isinstance(event, ToolResultEvent):
+            tag = "[bold red]✗[/]" if event.is_error else "[bold green]✓[/]"
+            preview = event.content[:60].replace("\n", " ").strip()
+            if len(event.content) > 60:
+                preview += "..."
+            elapsed = (
+                f" [dim]({event.elapsed_ms}ms)[/]" if event.elapsed_ms is not None else ""
+            )
+            console.print(f"{indent}  {tag} [dim]{preview}[/]{elapsed}", highlight=False)
+        elif isinstance(event, LlmUsageEvent):
+            console.print(
+                f"{indent}[dim]· ctx {event.context_pct:.0%}"
+                f" | in {event.input_tokens:,} · out {event.output_tokens:,}[/]",
+                highlight=False,
+            )
+        elif isinstance(event, ContextCompactedEvent):
+            console.print(
+                f"{indent}[bold magenta]📦[/] [dim]context compacted: "
+                f"{event.original_tokens:,} → {event.summary_tokens:,} tokens[/]",
+                highlight=False,
+            )
+        elif isinstance(event, SubagentStartedEvent):
+            self._subagents[event.run_id] = event.description
+            console.print(
+                f"  [bold blue]┌─[/] [bold]{event.description}[/] [dim]({event.run_id})[/]",
+                highlight=False,
+            )
+        elif isinstance(event, SubagentFinishedEvent):
+            self._subagents.pop(event.run_id, None)
+            if event.status == "success":
+                mark = "[bold green]✓[/]"
+            else:
+                mark = f"[bold red]✗[/][dim] ({event.reason or event.status})[/]"
+            console.print(f"  [bold blue]└─[/] {mark}", highlight=False)
+        # run.started / run.finished 的展示由命令层负责（Goal 面板与状态行）
 
 
 def _run_command(goal: str) -> None:
@@ -125,20 +159,15 @@ def _run_command(goal: str) -> None:
     from minicode.runner import AgentRunner
 
     config = get_config()
-    runner = AgentRunner(config)
+    bus = EventBus()
+    EventPrinter(bus)
+    runner = AgentRunner(config, bus=bus)
 
     t0 = time.time()
     console.print()
     console.print(Panel(goal, title="[bold]Goal[/bold]", border_style="blue"))
 
-    on_delta, _ = _make_delta_collector()
-    outcome = asyncio.run(runner.run_and_capture(
-        goal,
-        on_delta=on_delta,
-        on_tool_call=_make_tool_call_printer(),
-        on_tool_result=_make_tool_result_printer(),
-        on_compact=_make_compact_printer(),
-    ))
+    outcome = asyncio.run(runner.run_and_capture(goal))
 
     elapsed = time.time() - t0
     console.print()
@@ -159,7 +188,9 @@ def _chat_command(session_id: str = "default") -> None:
     from minicode.session.store import SessionStore
 
     config = get_config()
-    runner = AgentRunner(config)
+    bus = EventBus()
+    EventPrinter(bus)
+    runner = AgentRunner(config, bus=bus)
     store = SessionStore(Path(".minicode/sessions"))
 
     # 加载或创建会话
@@ -202,16 +233,11 @@ def _chat_command(session_id: str = "default") -> None:
             continue
 
         t0 = time.time()
-        on_delta, _ = _make_delta_collector()
         outcome = asyncio.run(runner.run_and_capture(
             user_input,
             session_id=session.id,
             store=store,
             prefill_messages=history,
-            on_delta=on_delta,
-            on_tool_call=_make_tool_call_printer(),
-            on_tool_result=_make_tool_result_printer(),
-            on_compact=_make_compact_printer(),
         ))
         elapsed = time.time() - t0
 

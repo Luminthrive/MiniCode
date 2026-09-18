@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from minicode.context import ExecutionContext
+from minicode.events.bus import (
+    ContextCompactedEvent,
+    EventBus,
+    LlmDeltaEvent,
+    LlmUsageEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    utc_now_iso,
+)
+from minicode.tools.base import ToolResult
 from minicode.tools.invocation import invoke_tool
 from minicode.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from minicode.compact.compactor import Compactor
-    from minicode.llm.base import DeltaCallback, LLMProvider
+    from minicode.llm.base import DeltaSink, LLMProvider
     from minicode.tools.permissions import PermissionManager
 
 logger = logging.getLogger(__name__)
@@ -23,26 +33,23 @@ class AgentLoop:
         self,
         provider: LLMProvider,
         registry: ToolRegistry,
+        bus: EventBus,
         *,
         compactor: Compactor | None = None,
         compact_threshold: float = 0.80,
         permission_manager: PermissionManager | None = None,
+        parent_run_id: str | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
+        self._bus = bus
         self._compactor = compactor
         self._compact_threshold = compact_threshold
         self._permission_manager = permission_manager
+        # 子 agent 的 loop 携带父 run_id，事件据此表达嵌套关系
+        self._parent_run_id = parent_run_id
 
-    async def run(
-        self,
-        context: ExecutionContext,
-        *,
-        on_delta: DeltaCallback | None = None,
-        on_tool_call: Any | None = None,
-        on_tool_result: Any | None = None,
-        on_compact: Any | None = None,
-    ) -> None:
+    async def run(self, context: ExecutionContext) -> None:
         import json as _json
         while not context.is_done():
             context.step += 1
@@ -83,7 +90,7 @@ class AgentLoop:
                         "- 用 PowerShell：Get-ChildItem/dir、Get-Content/type、Select-String\n"
                         "- 禁止路径遍历（..）"
                     ),
-                    on_delta=on_delta,
+                    delta_sink=self._make_delta_sink(context.run_id),
                 )
             except asyncio.CancelledError:
                 context.mark_failed("cancelled")
@@ -92,6 +99,17 @@ class AgentLoop:
                 logger.exception("LLM call failed run_id=%s step=%d", context.run_id, context.step)
                 context.mark_failed("llm_error")
                 break
+
+            if response.usage is not None:
+                await self._bus.publish(
+                    LlmUsageEvent(
+                        run_id=context.run_id,
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        context_pct=response.usage.context_pct,
+                        ts=utc_now_iso(),
+                    )
+                )
 
             openai_tool_calls: list[dict[str, object]] | None = None
             if response.tool_calls:
@@ -110,14 +128,12 @@ class AgentLoop:
             # 有 tool_calls 就必须执行；但输出被 max_tokens 截断时参数可能是残缺 JSON，不执行
             if response.tool_calls and response.stop_reason != "length":
                 for tc in response.tool_calls:
-                    if on_tool_call:
-                        await on_tool_call(tc.name, tc.input)
+                    await self._publish_tool_call(context.run_id, tc.name, tc.input, tc.id)
                     result = await invoke_tool(
                         self._registry, tc, context.run_id,
                         permission_manager=self._permission_manager,
                     )
-                    if on_tool_result:
-                        await on_tool_result(tc.name, result.content, result.is_error)
+                    await self._publish_tool_result(context.run_id, tc.name, tc.id, result)
                     context.add_tool_result(tc.id, result.content, is_error=result.is_error)
 
             # 终止判断
@@ -144,7 +160,54 @@ class AgentLoop:
                 and response.usage.context_pct >= self._compact_threshold
             ):
                 compacted = await self._compactor.compact(context, self._provider)
-                if compacted is not None and on_compact:
-                    await on_compact(
-                        compacted.original_token_estimate, compacted.summary_tokens
+                if compacted is not None:
+                    await self._bus.publish(
+                        ContextCompactedEvent(
+                            run_id=context.run_id,
+                            original_tokens=compacted.original_token_estimate,
+                            summary_tokens=compacted.summary_tokens,
+                            ts=utc_now_iso(),
+                        )
                     )
+
+    # 构造流式增量出口：把 provider 的 token 片段转成 LlmDeltaEvent 发布到总线
+    def _make_delta_sink(self, run_id: str) -> DeltaSink:
+        async def sink(text: str) -> None:
+            await self._bus.publish(
+                LlmDeltaEvent(run_id=run_id, text=text, ts=utc_now_iso())
+            )
+
+        return sink
+
+    # 发布工具调用开始事件
+    async def _publish_tool_call(
+        self, run_id: str, tool_name: str, args: dict[str, object], tool_call_id: str
+    ) -> None:
+        await self._bus.publish(
+            ToolCallEvent(
+                run_id=run_id,
+                parent_run_id=self._parent_run_id,
+                tool_name=tool_name,
+                args=dict(args),
+                tool_call_id=tool_call_id,
+                ts=utc_now_iso(),
+            )
+        )
+
+    # 发布工具调用结束事件（含耗时与错误分类）
+    async def _publish_tool_result(
+        self, run_id: str, tool_name: str, tool_call_id: str, result: ToolResult
+    ) -> None:
+        await self._bus.publish(
+            ToolResultEvent(
+                run_id=run_id,
+                parent_run_id=self._parent_run_id,
+                tool_name=tool_name,
+                content=result.content,
+                is_error=result.is_error,
+                error_type=result.error_type,
+                elapsed_ms=result.elapsed_ms,
+                tool_call_id=tool_call_id,
+                ts=utc_now_iso(),
+            )
+        )

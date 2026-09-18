@@ -16,6 +16,8 @@ class ToolResult:
     is_error: bool = False
     # "runtime_error" | "timeout" | "schema_error" | "permission_denied"
     error_type: str | None = None
+    # 整次调用耗时（毫秒，含重试等待），由 invoke_tool 统一填入
+    elapsed_ms: int | None = None
 
 
 # 路径安全检查：检测路径遍历

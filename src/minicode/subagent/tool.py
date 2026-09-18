@@ -14,6 +14,7 @@ from minicode.events.bus import (
     EventBus,
     SubagentFinishedEvent,
     SubagentStartedEvent,
+    utc_now_iso,
 )
 from minicode.loop import AgentLoop
 from minicode.tools.base import BaseTool, ToolResult
@@ -27,11 +28,6 @@ if TYPE_CHECKING:
     from minicode.llm.base import LLMProvider
 
 _profile_loader = AgentProfileLoader()
-
-
-# 返回当前 UTC 时间的 ISO 8601 字符串
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 # 生成唯一 run ID
@@ -124,18 +120,14 @@ class SpawnAgentTool(BaseTool):
             system_prompt_override=profile.system_prompt if profile else None,
         )
 
-        child_bus = EventBus()
-
-        # 将子 bus 所有事件桥接到父 bus
-        async def _bridge(event: BaseModel) -> None:
-            await self._parent_bus.publish(event)
-
-        child_bus.subscribe(_bridge)
-
         child_registry = self._build_child_registry(profile)
+        # 子 loop 直接向父 bus 发布事件（自带 child run_id 与 parent_run_id），
+        # CLI 据此嵌套展示子 agent 的 token 流与工具调用
         child_loop = AgentLoop(
             self._provider,
             child_registry,
+            self._parent_bus,
+            parent_run_id=self._parent_run_id,
         )
 
         await self._parent_bus.publish(
@@ -143,7 +135,7 @@ class SpawnAgentTool(BaseTool):
                 run_id=child_run_id,
                 parent_run_id=self._parent_run_id,
                 description=p.description,
-                ts=_now(),
+                ts=utc_now_iso(),
             )
         )
 
@@ -161,7 +153,8 @@ class SpawnAgentTool(BaseTool):
                 run_id=child_run_id,
                 parent_run_id=self._parent_run_id,
                 status=child_context.status,
-                ts=_now(),
+                reason=child_context.reason,
+                ts=utc_now_iso(),
             )
         )
 

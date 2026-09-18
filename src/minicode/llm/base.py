@@ -7,13 +7,13 @@ from typing import Protocol
 
 from minicode.llm.types import LlmResponse
 
-# 流式增量回调：接收文本片段
-DeltaCallback = Callable[[str], Awaitable[None]]
+# 流式增量出口：接收文本片段（provider 层内部机制，由调用方决定是否转成事件）
+type DeltaSink = Callable[[str], Awaitable[None]]
 
 
 # LLM 提供者协议：定义 chat 方法接口
 class LLMProvider(Protocol):
-    # 调用 LLM 并返回完整响应；on_delta 用于流式输出时逐片段回调
+    # 调用 LLM 并返回完整响应；delta_sink 用于流式输出时逐片段送达
     async def chat(
         self,
         messages: list[dict[str, object]],
@@ -22,5 +22,5 @@ class LLMProvider(Protocol):
         *,
         step: int = 0,
         system: str | None = None,
-        on_delta: DeltaCallback | None = None,
+        delta_sink: DeltaSink | None = None,
     ) -> LlmResponse: ...
