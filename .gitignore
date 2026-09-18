@@ -9,7 +9,8 @@ build/
 .eggs/
 uv.lock
 .ruff_cache
-
+.mypy_cache
+.zcode
 # Virtual environments
 .venv/
 venv/
