@@ -155,12 +155,16 @@ class EventPrinter:
 
 def _run_command(goal: str) -> None:
     """执行一次 agent run"""
+    from pathlib import Path
+
     from minicode.config import get_config
+    from minicode.events.writer import EventWriter
     from minicode.runner import AgentRunner
 
     config = get_config()
     bus = EventBus()
     EventPrinter(bus)
+    bus.subscribe(EventWriter(Path(".minicode/traces")))
     runner = AgentRunner(config, bus=bus)
 
     t0 = time.time()
@@ -183,6 +187,7 @@ def _chat_command(session_id: str = "default") -> None:
     from pathlib import Path
 
     from minicode.config import get_config
+    from minicode.events.writer import EventWriter
     from minicode.runner import AgentRunner
     from minicode.session.model import Session
     from minicode.session.store import SessionStore
@@ -190,6 +195,8 @@ def _chat_command(session_id: str = "default") -> None:
     config = get_config()
     bus = EventBus()
     EventPrinter(bus)
+    # chat 多轮每轮新建 trace_id，写入端按 trace 自动分目录
+    bus.subscribe(EventWriter(Path(".minicode/traces")))
     runner = AgentRunner(config, bus=bus)
     store = SessionStore(Path(".minicode/sessions"))
 
