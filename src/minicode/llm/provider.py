@@ -58,7 +58,7 @@ class OpenAIProvider:
             payload["tools"] = tool_schemas
 
         # 始终使用流式调用
-        async def _noop(text: str) -> None:
+        async def _noop(text: str, _attempt: int) -> None:
             pass
         _fn = delta_sink or _noop
         return await self._chat_stream(payload, run_id, _fn)
@@ -144,7 +144,7 @@ class OpenAIProvider:
                         text_delta = delta.get("content", "")
                         if text_delta:
                             text_parts.append(text_delta)
-                            await delta_sink(text_delta)
+                            await delta_sink(text_delta, attempt)
 
                         for tc_delta in delta.get("tool_calls") or []:
                             idx = tc_delta.get("index", 0)

@@ -7,8 +7,9 @@ from typing import Protocol
 
 from minicode.llm.types import LlmResponse
 
-# 流式增量出口：接收文本片段（provider 层内部机制，由调用方决定是否转成事件）
-type DeltaSink = Callable[[str], Awaitable[None]]
+# 流式增量出口：参数为 (文本片段, 重试轮次 attempt，从 1 开始)
+# （provider 层内部机制，由调用方决定是否转成事件）
+type DeltaSink = Callable[[str, int], Awaitable[None]]
 
 
 # LLM 提供者协议：定义 chat 方法接口

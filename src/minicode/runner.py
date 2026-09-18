@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from minicode.compact.compactor import Compactor
@@ -17,6 +16,7 @@ from minicode.events.bus import (
     RunStartedEvent,
     utc_now_iso,
 )
+from minicode.ids import create_id
 from minicode.llm.provider import OpenAIProvider
 from minicode.loop import AgentLoop
 from minicode.session.store import SessionStore
@@ -34,10 +34,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _new_run_id() -> str:
-    return datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
-
-
 @dataclass
 class RunOutcome:
     status: str
@@ -45,6 +41,8 @@ class RunOutcome:
     reason: str | None
     # 本轮结束后的会话状态（含压缩后的形态），供调用方直接作为下一轮上下文
     messages: list[dict[str, Any]]
+    # 本次任务的 Trace 标识（与事件流中的 trace_id 一致）
+    trace_id: str
 
 
 class AgentRunner:
@@ -58,6 +56,7 @@ class AgentRunner:
         *,
         provider: LLMProvider,
         bus: EventBus,
+        trace_id: str,
         run_id: str,
         max_steps: int,
     ) -> ToolRegistry:
@@ -68,6 +67,7 @@ class AgentRunner:
             SpawnAgentTool(
                 provider=provider,
                 parent_bus=bus,
+                parent_trace_id=trace_id,
                 parent_run_id=run_id,
                 max_steps=max_steps,
                 depth=0,
@@ -85,7 +85,9 @@ class AgentRunner:
         system_prompt_override: str | None = None,
         prefill_messages: list[dict[str, Any]] | None = None,
     ) -> RunOutcome:
-        run_id = run_id or _new_run_id()
+        # 一次 run_and_capture = 一次完整任务：trace_id 新建，子 agent 全部继承
+        trace_id = create_id("trace")
+        run_id = run_id or create_id("run")
         prefill_len = len(prefill_messages) if prefill_messages else 0
 
         bus = self._bus if self._bus is not None else EventBus()
@@ -102,7 +104,9 @@ class AgentRunner:
         # 先留存原列表引用，确保压缩触发后仍能取到完整本轮消息用于持久化
         messages_log = context.messages
 
-        await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=utc_now_iso()))
+        await bus.publish(
+            RunStartedEvent(trace_id=trace_id, run_id=run_id, goal=goal, ts=utc_now_iso())
+        )
 
         cancelled = False
         try:
@@ -113,13 +117,15 @@ class AgentRunner:
             )
 
             registry = self._build_registry(
-                provider=provider, bus=bus, run_id=run_id, max_steps=self._config.max_steps,
+                provider=provider, bus=bus, trace_id=trace_id, run_id=run_id,
+                max_steps=self._config.max_steps,
             )
 
             compactor = Compactor(session_id or "")
             permission_manager = PermissionManager()
             loop = AgentLoop(
                 provider, registry, bus,
+                trace_id=trace_id,
                 compactor=compactor,
                 compact_threshold=self._config.compact_threshold,
                 permission_manager=permission_manager,
@@ -136,6 +142,7 @@ class AgentRunner:
 
         await bus.publish(
             RunFinishedEvent(
+                trace_id=trace_id,
                 run_id=run_id,
                 status=context.status,
                 reason=context.reason,
@@ -164,4 +171,5 @@ class AgentRunner:
             result=context.result,
             reason=context.reason,
             messages=list(context.messages),
+            trace_id=trace_id,
         )

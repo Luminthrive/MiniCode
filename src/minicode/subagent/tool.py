@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict
@@ -16,6 +15,7 @@ from minicode.events.bus import (
     SubagentStartedEvent,
     utc_now_iso,
 )
+from minicode.ids import create_id
 from minicode.loop import AgentLoop
 from minicode.tools.base import BaseTool, ToolResult
 from minicode.tools.builtin.bash import BashTool
@@ -28,11 +28,6 @@ if TYPE_CHECKING:
     from minicode.llm.base import LLMProvider
 
 _profile_loader = AgentProfileLoader()
-
-
-# 生成唯一 run ID
-def _new_run_id() -> str:
-    return datetime.now(UTC).strftime("%Y%m%d_%H%M%S") + f"_{asyncio.get_event_loop().time():.0f}"
 
 
 # 派生子代理参数模型
@@ -83,12 +78,15 @@ class SpawnAgentTool(BaseTool):
         self,
         provider: LLMProvider,
         parent_bus: EventBus,
+        parent_trace_id: str,
         parent_run_id: str,
         max_steps: int,
         depth: int = 0,
     ) -> None:
         self._provider = provider
         self._parent_bus = parent_bus
+        # 子 agent 不新建 Trace：整个任务的所有 run 共享同一 trace_id
+        self._parent_trace_id = parent_trace_id
         self._parent_run_id = parent_run_id
         self._max_steps = max_steps
         self._depth = depth
@@ -110,7 +108,7 @@ class SpawnAgentTool(BaseTool):
             # TOML 读取为同步磁盘 IO，丢线程池避免阻塞事件循环
             profile = await asyncio.to_thread(_profile_loader.load, p.subagent_type)
 
-        child_run_id = _new_run_id()
+        child_run_id = create_id("run")
         # planner 5步够用，executor 需要更多步（读文件+分析+写报告）
         max_child_steps = 5 if p.subagent_type == "planner" else min(self._max_steps, 20)
         child_context = ExecutionContext(
@@ -121,17 +119,19 @@ class SpawnAgentTool(BaseTool):
         )
 
         child_registry = self._build_child_registry(profile)
-        # 子 loop 直接向父 bus 发布事件（自带 child run_id 与 parent_run_id），
-        # CLI 据此嵌套展示子 agent 的 token 流与工具调用
+        # 子 loop 直接向父 bus 发布事件，trace_id 继承父任务、
+        # run_id 重新生成、parent_run_id 指向父——三个字段共同表达树的节点与边
         child_loop = AgentLoop(
             self._provider,
             child_registry,
             self._parent_bus,
+            trace_id=self._parent_trace_id,
             parent_run_id=self._parent_run_id,
         )
 
         await self._parent_bus.publish(
             SubagentStartedEvent(
+                trace_id=self._parent_trace_id,
                 run_id=child_run_id,
                 parent_run_id=self._parent_run_id,
                 description=p.description,
@@ -150,6 +150,7 @@ class SpawnAgentTool(BaseTool):
 
         await self._parent_bus.publish(
             SubagentFinishedEvent(
+                trace_id=self._parent_trace_id,
                 run_id=child_run_id,
                 parent_run_id=self._parent_run_id,
                 status=child_context.status,
