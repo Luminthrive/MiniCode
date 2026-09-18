@@ -76,27 +76,58 @@ def main() -> None:
 
 # 工具参数摘要：单行显示
 def _summarize_args(name: str, args: dict[str, Any]) -> str:
-    """生成工具参数的单行摘要"""
-    if name == "read_file":
-        return str(args.get("path", "?"))
-    elif name == "write_file":
-        return str(args.get("path", "?"))
-    elif name == "bash":
+    """生成工具参数的单行摘要；bash 完整显示命令，多行命令折叠为首行 + 行数"""
+    if name == "bash":
         cmd = str(args.get("command", "?"))
-        return cmd[:50] + ("..." if len(cmd) > 50 else "")
-    elif name == "list_dir":
+        lines = cmd.splitlines() or ["?"]
+        first = lines[0]
+        if len(first) > 120:
+            first = first[:120] + "..."
+        if len(lines) > 1:
+            first += f" (+{len(lines) - 1} lines)"
+        return first
+    if name == "edit_file":
+        path = str(args.get("path", "?"))
+        old_lines = str(args.get("old_string", "")).splitlines() or [""]
+        new_lines = str(args.get("new_string", "")).splitlines() or [""]
+        suffix = f" (+{len(old_lines) - 1} lines)" if len(old_lines) > 1 else ""
+
+        # 取第一处差异行展示：old/new 首行常是相同的段落标记，差异行才有辨识度
+        i = 0
+        while i < min(len(old_lines), len(new_lines)) and old_lines[i] == new_lines[i]:
+            i += 1
+        old_first = old_lines[i] if i < len(old_lines) else ""
+        new_first = new_lines[i] if i < len(new_lines) else ""
+
+        def _clip(s: str) -> str:
+            return s[:32] + "..." if len(s) > 32 else s
+
+        return f"{path}{suffix}: {_clip(old_first)} -> {_clip(new_first)}"
+    if name in ("read_file", "write_file", "list_dir"):
         return str(args.get("path", "."))
-    elif name == "spawn_agent":
-        return str(args.get("subagent_type", "default"))
-    else:
-        return str(args)[:40]
+    if name == "spawn_agent":
+        agent_type = args.get("subagent_type") or "default"
+        return f"{agent_type} · {args.get('description', '')}"
+    return str(args)[:60]
+
+
+# 由事件 ts 计算时长（replay 回放时也能得到真实耗时）
+def _format_duration(start: str, end: str) -> str:
+    try:
+        delta = datetime.fromisoformat(end) - datetime.fromisoformat(start)
+        return f"{delta.total_seconds():.1f}s"
+    except ValueError:
+        return "-"
 
 
 # 事件打印器：订阅 EventBus，将运行中的各类事件渲染到终端
 class EventPrinter:
     def __init__(self, bus: EventBus) -> None:
         self._inline = False  # 上一条 llm.delta 之后尚未换行
-        self._subagents: dict[str, str] = {}  # child_run_id -> description
+        self._at_line_start = True  # 子代理流式输出是否位于行首（决定补不补 │ 前缀）
+        self._current_child: str | None = None
+        # child_run_id -> 聚合信息：子代理块内的 usage/tool 累计，结束时统一展示
+        self._subagents: dict[str, dict[str, Any]] = {}
         bus.subscribe(self.handle)
 
     # 补一个换行，避免后续事件行接在未结束的流式文本后半行
@@ -111,56 +142,165 @@ class EventPrinter:
             return True
         return event.run_id in self._subagents  # type: ignore[attr-defined]
 
+    # 流式输出：子代理文本带 │ 前缀与 dim 样式，与主 agent 输出区分层级
+    def _print_delta(self, text: str) -> None:
+        if self._current_child is None:
+            console.print(text, end="", markup=False, highlight=False)
+            self._inline = True
+            return
+        if not text:
+            return
+        if self._at_line_start:
+            console.print("  │ ", end="", markup=False, highlight=False)
+            self._at_line_start = False
+        body = text.replace("\r\n", "\n")
+        trailing = body.endswith("\n")
+        if trailing:
+            body = body[:-1]
+        body = body.replace("\n", "\n  │ ")
+        if body:
+            console.print(body, end="", markup=False, highlight=False, style="dim")
+        if trailing:
+            console.print()
+            self._at_line_start = True
+            self._inline = False
+        else:
+            self._inline = True
+
     async def handle(self, event: BaseModel) -> None:
         if isinstance(event, LlmDeltaEvent):
             # 前台模式下父与子 agent 不会同时流式输出，token 原样追加即可
-            console.print(event.text, end="", highlight=False)
-            self._inline = True
+            self._print_delta(event.text)
             return
 
         self._ensure_newline()
-        indent = "      " if self._is_child(event) else "  "
+        # 非流式事件打印都会另起一行，流式前缀标志随之复位
+        # （否则子代理下一段文本会因标志滞留 False 而顶格漏出 │ gutter）
+        self._at_line_start = True
 
-        if isinstance(event, ToolCallEvent):
-            summary = _summarize_args(event.tool_name, dict(event.args))
+        if isinstance(event, LlmUsageEvent):
+            agg = self._subagents.get(event.run_id)
+            if agg is not None:
+                # 子代理 usage 不逐条打印，累计进结束行
+                agg["in"] += event.input_tokens
+                agg["out"] += event.output_tokens
+                return
             console.print(
-                f"{indent}[bold yellow]⚡[/] [cyan]{event.tool_name}[/]([dim]{summary}[/])",
-                highlight=False,
-            )
-        elif isinstance(event, ToolResultEvent):
-            tag = "[bold red]✗[/]" if event.is_error else "[bold green]✓[/]"
-            preview = event.content[:60].replace("\n", " ").strip()
-            if len(event.content) > 60:
-                preview += "..."
-            elapsed = (
-                f" [dim]({event.elapsed_ms}ms)[/]" if event.elapsed_ms is not None else ""
-            )
-            console.print(f"{indent}  {tag} [dim]{preview}[/]{elapsed}", highlight=False)
-        elif isinstance(event, LlmUsageEvent):
-            console.print(
-                f"{indent}[dim]· ctx {event.context_pct:.0%}"
+                f"  [dim]· ctx {event.context_pct:.0%}"
                 f" | in {event.input_tokens:,} · out {event.output_tokens:,}[/]",
                 highlight=False,
             )
+        elif isinstance(event, ToolCallEvent):
+            child = self._is_child(event)
+            if child and event.run_id in self._subagents:
+                self._subagents[event.run_id]["tools"] += 1
+            indent = "  │   " if child else "  "
+            summary = _summarize_args(event.tool_name, dict(event.args))
+            console.print(
+                f"{indent}[bold yellow]⚡[/] [cyan]{event.tool_name}[/] [dim]{summary}[/]",
+                highlight=False,
+                no_wrap=True,
+                overflow="ellipsis",
+            )
+        elif isinstance(event, ToolResultEvent):
+            indent = "  │     " if self._is_child(event) else "    "
+            elapsed = (
+                f" [dim]({event.elapsed_ms}ms)[/]" if event.elapsed_ms is not None else ""
+            )
+            # 子代理最终报告已在块内流式输出过，这里只报大小不重复内容
+            if event.tool_name == "spawn_agent" and not event.is_error:
+                console.print(
+                    f"{indent}[bold green]✓[/] [dim]subagent result: "
+                    f"{len(event.content):,} chars{elapsed}[/]",
+                    highlight=False,
+                    no_wrap=True,
+                    overflow="ellipsis",
+                )
+                return
+
+            # 跳过开头空行，取第一个非空行做预览（PowerShell 输出常以空行开头）
+            lines = event.content.splitlines()
+            start = next((i for i, ln in enumerate(lines) if ln.strip()), None)
+            if event.is_error:
+                if start is None:
+                    console.print(
+                        f"{indent}[bold red]✗[/] [red](empty error)[/]{elapsed}",
+                        highlight=False,
+                        no_wrap=True,
+                        overflow="ellipsis",
+                    )
+                    return
+                kept = [ln.strip()[:100] for ln in lines[start:start + 2]]
+                extra = len(lines) - start - len(kept)
+                console.print(
+                    f"{indent}[bold red]✗[/] [red]{kept[0]}[/]{elapsed}",
+                    highlight=False,
+                    no_wrap=True,
+                    overflow="ellipsis",
+                )
+                for ln in kept[1:]:
+                    console.print(
+                        f"{indent}  [red]{ln}[/]",
+                        highlight=False,
+                        no_wrap=True,
+                        overflow="ellipsis",
+                    )
+                if extra > 0:
+                    console.print(
+                        f"{indent}  [dim](+{extra} lines)[/]", highlight=False
+                    )
+            else:
+                if start is None:
+                    body, note = "(empty output)", ""
+                else:
+                    raw = lines[start].strip()
+                    body = raw[:72] + "..." if len(raw) > 72 else raw
+                    extra = len(lines) - start - 1
+                    note = f" (+{extra} lines)" if extra > 0 else ""
+                console.print(
+                    f"{indent}[bold green]✓[/] [dim]{body}{note}{elapsed}[/]",
+                    highlight=False,
+                    no_wrap=True,
+                    overflow="ellipsis",
+                )
         elif isinstance(event, ContextCompactedEvent):
+            indent = "  │   " if self._is_child(event) else "  "
             console.print(
                 f"{indent}[bold magenta]📦[/] [dim]context compacted: "
                 f"{event.original_tokens:,} → {event.summary_tokens:,} tokens[/]",
                 highlight=False,
             )
         elif isinstance(event, SubagentStartedEvent):
-            self._subagents[event.run_id] = event.description
+            self._subagents[event.run_id] = {
+                "description": event.description,
+                "started": event.ts,
+                "tools": 0,
+                "in": 0,
+                "out": 0,
+            }
+            self._current_child = event.run_id
+            self._at_line_start = True
             console.print(
-                f"  [bold blue]┌─[/] [bold]{event.description}[/] [dim]({event.run_id})[/]",
+                f"  [bold blue]┌─[/] [bold]{event.description}[/] [dim]({event.run_id[:12]})[/]",
                 highlight=False,
+                no_wrap=True,
+                overflow="ellipsis",
             )
         elif isinstance(event, SubagentFinishedEvent):
-            self._subagents.pop(event.run_id, None)
+            agg = self._subagents.pop(event.run_id, None)
+            self._current_child = None
             if event.status == "success":
                 mark = "[bold green]✓[/]"
             else:
                 mark = f"[bold red]✗[/][dim] ({event.reason or event.status})[/]"
-            console.print(f"  [bold blue]└─[/] {mark}", highlight=False)
+            stats = ""
+            if agg is not None:
+                duration = _format_duration(agg["started"], event.ts)
+                stats = (
+                    f" [dim]{duration} · {agg['tools']} tools"
+                    f" · in {agg['in']:,} · out {agg['out']:,}[/]"
+                )
+            console.print(f"  [bold blue]└─[/] {mark}{stats}", highlight=False, no_wrap=True, overflow="ellipsis")
         # run.started / run.finished 的展示由命令层负责（Goal 面板与状态行）
 
 

@@ -102,6 +102,7 @@ class SpawnAgentTool(BaseTool):
                 content="Subagent nesting limit (1) reached; cannot spawn further subagents.",
                 is_error=True,
                 error_type="runtime_error",
+                retryable=False,
             )
 
         profile: AgentProfile | None = None

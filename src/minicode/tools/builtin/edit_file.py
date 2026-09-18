@@ -29,8 +29,9 @@ class EditFileTool(BaseTool):
     description = (
         "Make a targeted edit to an existing text file by replacing an exact string. "
         "old_string must match the file content exactly and be unique — include enough "
-        "surrounding lines to disambiguate. Only the matched span changes; the rest of "
-        "the file is preserved byte-for-byte. "
+        "surrounding lines to disambiguate. Matching normalizes line endings, so an "
+        "old_string with LF also matches CRLF files. Only the matched span changes; the "
+        "rest of the file is preserved byte-for-byte. "
         "Use write_file instead to create new files or rewrite a whole file."
     )
     input_schema: dict[str, Any] = {
@@ -65,13 +66,19 @@ class EditFileTool(BaseTool):
 
         safety_error = check_path_safety(p.path)
         if safety_error:
-            return ToolResult(content=safety_error, is_error=True, error_type="permission_denied")
+            return ToolResult(
+                content=safety_error,
+                is_error=True,
+                error_type="permission_denied",
+                retryable=False,
+            )
 
         if p.old_string == p.new_string:
             return ToolResult(
                 content="old_string and new_string are identical; nothing to edit",
                 is_error=True,
                 error_type="runtime_error",
+                retryable=False,
             )
 
         path = Path(p.path)
@@ -83,6 +90,7 @@ class EditFileTool(BaseTool):
                 ),
                 is_error=True,
                 error_type="runtime_error",
+                retryable=False,
             )
 
         try:
@@ -98,6 +106,7 @@ class EditFileTool(BaseTool):
                 content=f"file too large: {len(raw)} bytes (limit 1 MB)",
                 is_error=True,
                 error_type="runtime_error",
+                retryable=False,
             )
         try:
             text = raw.decode("utf-8")
@@ -106,9 +115,17 @@ class EditFileTool(BaseTool):
                 content=f"{p.path} is not valid UTF-8 text; cannot edit",
                 is_error=True,
                 error_type="runtime_error",
+                retryable=False,
             )
 
-        occurrences = text.count(p.old_string)
+        # 匹配在归一化换行后进行：LF 的 old_string 也能命中 CRLF 文件
+        crlf_pairs = text.count("\r\n")
+        eol = "\r\n" if crlf_pairs and crlf_pairs * 2 >= text.count("\n") else "\n"
+        norm = text.replace("\r\n", "\n")
+        old = p.old_string.replace("\r\n", "\n")
+        new = p.new_string.replace("\r\n", "\n")
+
+        occurrences = norm.count(old)
         if occurrences == 0:
             return ToolResult(
                 content=(
@@ -117,6 +134,7 @@ class EditFileTool(BaseTool):
                 ),
                 is_error=True,
                 error_type="runtime_error",
+                retryable=False,
             )
         if occurrences > 1 and not p.replace_all:
             return ToolResult(
@@ -126,21 +144,26 @@ class EditFileTool(BaseTool):
                 ),
                 is_error=True,
                 error_type="runtime_error",
+                retryable=False,
             )
 
         if p.replace_all:
-            new_text = text.replace(p.old_string, p.new_string)
+            merged = norm.replace(old, new)
         else:
-            new_text = text.replace(p.old_string, p.new_string, 1)
+            merged = norm.replace(old, new, 1)
+        # 写回前还原文件的主导换行风格
+        if eol == "\r\n":
+            merged = merged.replace("\n", "\r\n")
 
-        if len(new_text.encode("utf-8")) > _MAX_BYTES:
+        if len(merged.encode("utf-8")) > _MAX_BYTES:
             return ToolResult(
                 content="resulting content too large (limit 1 MB)",
                 is_error=True,
                 error_type="runtime_error",
+                retryable=False,
             )
 
-        # 用字节写回避免文本模式的 \n→os.linesep 翻译把已有 CRLF 变成 \r\r\n
-        await asyncio.to_thread(path.write_bytes, new_text.encode("utf-8"))
+        # 字节写回：不做文本模式换行翻译，保持上面还原后的字节
+        await asyncio.to_thread(path.write_bytes, merged.encode("utf-8"))
         replaced = occurrences if p.replace_all else 1
         return ToolResult(content=f"replaced {replaced} occurrence(s) in {p.path}")

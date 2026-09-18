@@ -67,6 +67,7 @@ class WriteFileTool(BaseTool):
                 content=f"content too large: {len(encoded)} bytes (limit 1 MB)",
                 is_error=True,
                 error_type="runtime_error",
+                retryable=False,
             )
 
         path = Path(path_str)

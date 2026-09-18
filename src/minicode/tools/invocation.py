@@ -82,6 +82,9 @@ async def _invoke_with_retries(
                 tool.invoke(dict(tool_call.input)), timeout=timeout
             )
             if result.is_error:
+                # 确定性错误重试也不会变（未命中/参数错等），立即返回不退避
+                if not result.retryable:
+                    return result
                 last_error = result.content
                 if attempt <= _MAX_RETRIES:
                     await asyncio.sleep(_RETRY_BASE_S * (2 ** (attempt - 1)))

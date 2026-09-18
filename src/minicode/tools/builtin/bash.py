@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import locale
+import logging
+import os
 import sys
 from typing import Any
 
@@ -65,20 +68,27 @@ class BashTool(BaseTool):
         # 安全检查
         danger = _is_dangerous(command)
         if danger:
-            return ToolResult(content=danger, is_error=True, error_type="runtime_error")
+            return ToolResult(
+                content=danger, is_error=True, error_type="runtime_error", retryable=False
+            )
 
-        # Windows 使用 PowerShell 以支持中文输出
+        # 注入 UTF-8 输出环境：python 子进程按 UTF-8 打印，不再继承 GBK 代码页
+        child_env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+
+        # Windows 使用 PowerShell 执行命令
         if sys.platform == "win32":
             proc = await asyncio.create_subprocess_exec(
                 "powershell", "-NoProfile", "-Command", command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env=child_env,
             )
         else:
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env=child_env,
             )
 
         try:
@@ -92,15 +102,20 @@ class BashTool(BaseTool):
                 content=f"[timeout after {timeout}s]",
                 is_error=True,
                 error_type="timeout",
+                # 重试会重复执行同一条命令，副作用风险不可接受
+                retryable=False,
             )
         except Exception as exc:
             return ToolResult(content=str(exc), is_error=True, error_type="runtime_error")
 
-        # Windows PowerShell 输出 UTF-8，cmd.exe 输出 GBK
-        if sys.platform == "win32":
-            output = stdout_bytes.decode("utf-8", errors="replace")
-        else:
-            output = stdout_bytes.decode("utf-8", errors="replace")
+        # 解码分层：python 子进程已注入 UTF-8 环境输出 UTF-8；
+        # 原生程序可能仍输出本地代码页字符，utf-8 失败后回落本地编码
+        try:
+            output = stdout_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            output = stdout_bytes.decode(
+                locale.getpreferredencoding(False), errors="replace"
+            )
 
         truncated = len(stdout_bytes) > _MAX_OUTPUT_BYTES
         if truncated:
@@ -112,5 +127,7 @@ class BashTool(BaseTool):
                 content=f"[exit {returncode}]\n{output}",
                 is_error=True,
                 error_type="runtime_error",
+                # 非零退出重试会再次执行命令，同样有副作用风险
+                retryable=False,
             )
         return ToolResult(content=output or "[no output]")
