@@ -105,7 +105,10 @@ class AgentRunner:
         messages_log = context.messages
 
         await bus.publish(
-            RunStartedEvent(trace_id=trace_id, run_id=run_id, goal=goal, ts=utc_now_iso())
+            RunStartedEvent(
+                trace_id=trace_id, run_id=run_id, goal=goal,
+                session_id=session_id, ts=utc_now_iso(),
+            )
         )
 
         cancelled = False
@@ -144,6 +147,7 @@ class AgentRunner:
             RunFinishedEvent(
                 trace_id=trace_id,
                 run_id=run_id,
+                session_id=session_id,
                 status=context.status,
                 reason=context.reason,
                 steps=context.step,

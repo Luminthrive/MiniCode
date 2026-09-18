@@ -20,71 +20,64 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-# 运行开始事件
-class RunStartedEvent(BaseModel):
-    type: Literal["run.started"] = "run.started"
+# 所有事件的公共基座：身份三件套（Trace 管任务、Run 管 Agent、ts 管时序）
+class BaseEvent(BaseModel):
     # 所属 Trace：一次 run_and_capture 创建一个，子 agent 的所有事件继承同一 Trace
     trace_id: str
     run_id: str
-    goal: str
     ts: str
+
+
+# 运行开始事件
+class RunStartedEvent(BaseEvent):
+    type: Literal["run.started"] = "run.started"
+    # 所属长期会话（chat 模式才有；run 模式为 None）
+    session_id: str | None = None
+    goal: str
 
 
 # 运行结束事件
-class RunFinishedEvent(BaseModel):
+class RunFinishedEvent(BaseEvent):
     type: Literal["run.finished"] = "run.finished"
-    trace_id: str
-    run_id: str
+    session_id: str | None = None
     status: str
     reason: str | None = None
     steps: int
-    ts: str
 
 
 # LLM 流式文本增量事件
-class LlmDeltaEvent(BaseModel):
+class LlmDeltaEvent(BaseEvent):
     type: Literal["llm.delta"] = "llm.delta"
-    trace_id: str
-    run_id: str
     text: str
     # LLM 网络重试会从头重放流式输出，attempt 用于渲染/回放端按轮去重
     attempt: int = 1
     # 所属执行步（从 1 开始）；0 表示非步范围或未知（各步级事件同名字段含义相同）
     step: int = 0
-    ts: str
 
 
 # LLM 响应统计事件
-class LlmUsageEvent(BaseModel):
+class LlmUsageEvent(BaseEvent):
     type: Literal["llm.usage"] = "llm.usage"
-    trace_id: str
-    run_id: str
     input_tokens: int
     output_tokens: int
     context_pct: float
     step: int = 0
-    ts: str
 
 
 # 工具调用开始事件
-class ToolCallEvent(BaseModel):
+class ToolCallEvent(BaseEvent):
     type: Literal["tool.call"] = "tool.call"
-    trace_id: str
-    run_id: str
     # 子 agent 发布的工具事件携带父 run_id，渲染端据此缩进嵌套展示
     parent_run_id: str | None = None
     tool_name: str
     args: dict[str, object]
     tool_call_id: str | None = None
     step: int = 0
-    ts: str
 
 
 # 工具调用结束事件
-class ToolResultEvent(BaseModel):
+class ToolResultEvent(BaseEvent):
     type: Literal["tool.result"] = "tool.result"
-    trace_id: str
-    run_id: str
     parent_run_id: str | None = None
     tool_name: str
     content: str
@@ -94,39 +87,29 @@ class ToolResultEvent(BaseModel):
     elapsed_ms: int | None = None
     tool_call_id: str | None = None
     step: int = 0
-    ts: str
 
 
 # 上下文压缩完成事件
-class ContextCompactedEvent(BaseModel):
+class ContextCompactedEvent(BaseEvent):
     type: Literal["context.compacted"] = "context.compacted"
-    trace_id: str
-    run_id: str
     original_tokens: int
     summary_tokens: int
     step: int = 0
-    ts: str
 
 
 # 子代理开始事件
-class SubagentStartedEvent(BaseModel):
+class SubagentStartedEvent(BaseEvent):
     type: Literal["subagent.started"] = "subagent.started"
-    trace_id: str
-    run_id: str
     parent_run_id: str
     description: str
-    ts: str
 
 
 # 子代理结束事件
-class SubagentFinishedEvent(BaseModel):
+class SubagentFinishedEvent(BaseEvent):
     type: Literal["subagent.finished"] = "subagent.finished"
-    trace_id: str
-    run_id: str
     parent_run_id: str
     status: str
     reason: str | None = None
-    ts: str
 
 
 # 全部事件的判别联合，供订阅端统一分发/序列化
