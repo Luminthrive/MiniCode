@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 
 from minicode import __version__
 from minicode.events.bus import (
@@ -56,6 +57,8 @@ def main() -> None:
     chat_parser.add_argument("-s", "--session", default="default", help="会话 ID（默认 default）")
     replay_parser = subparsers.add_parser("replay", help="离线回放一次历史 trace（不调用 LLM）")
     replay_parser.add_argument("trace_id", help="Trace ID（.minicode/traces 下的目录名）")
+    stats_parser = subparsers.add_parser("stats", help="输出一次 trace 的运行指标汇总")
+    stats_parser.add_argument("trace_id", help="Trace ID（.minicode/traces 下的目录名）")
     args = parser.parse_args()
     _setup_logging(args.verbose)
 
@@ -65,6 +68,8 @@ def main() -> None:
         _chat_command(session_id=args.session)
     elif args.command == "replay":
         _replay_command(args.trace_id)
+    elif args.command == "stats":
+        _stats_command(args.trace_id)
     else:
         parser.print_help()
 
@@ -304,3 +309,69 @@ def _replay_command(trace_id: str) -> None:
     console.print()
     status_style = "bold green" if status == "success" else "bold red"
     console.print(f"[{status_style}][replay] {status} · {steps} steps[/]", highlight=False)
+
+
+def _stats_command(trace_id: str) -> None:
+    """基于 trace 事件流计算运行指标（不调用 LLM）"""
+    from pathlib import Path
+
+    from minicode.events.metrics import summarize_trace
+    from minicode.events.replay import TraceReadError, read_trace
+
+    path = Path(".minicode/traces") / trace_id / "events.jsonl"
+    if not path.exists():
+        console.print(f"[red]trace 不存在: {trace_id}[/red]（未找到 {path}）")
+        sys.exit(1)
+
+    try:
+        events = read_trace(path)
+    except TraceReadError as e:
+        console.print(f"[red]trace 文件损坏: {e}[/red]")
+        sys.exit(1)
+
+    if not events:
+        console.print(f"[yellow]trace 为空: {trace_id}[/yellow]")
+        return
+
+    s = summarize_trace(events)
+    duration = f"{s.duration_s:.1f}s" if s.duration_s is not None else "-"
+
+    console.print()
+    body = "\n".join(
+        [
+            f"status [bold]{s.status}[/bold] · steps {s.steps} · duration {duration}",
+            f"LLM {s.llm_calls} calls · in {s.input_tokens:,} · out {s.output_tokens:,}"
+            f" · retries {s.retries}",
+            f"Tool {s.tool_calls} calls · failed {s.tool_errors}",
+            f"Subagents {s.subagents} · Compactions {s.compactions}",
+        ]
+    )
+    console.print(Panel(body, title=f"[bold]Trace {trace_id}[/bold]", border_style="blue"))
+
+    if s.runs:
+        run_table = Table(title="Runs")
+        run_table.add_column("run_id")
+        run_table.add_column("role")
+        run_table.add_column("llm", justify="right")
+        run_table.add_column("tokens in/out", justify="right")
+        run_table.add_column("tool call/fail", justify="right")
+        for r in s.runs:
+            run_table.add_row(
+                r.run_id,
+                "subagent" if r.is_subagent else "root",
+                str(r.llm_calls),
+                f"{r.input_tokens:,}/{r.output_tokens:,}",
+                f"{r.tool_calls}/{r.tool_errors}",
+            )
+        console.print(run_table)
+
+    if s.tools:
+        tool_table = Table(title="Tools")
+        tool_table.add_column("tool")
+        tool_table.add_column("calls", justify="right")
+        tool_table.add_column("errors", justify="right")
+        tool_table.add_column("avg ms", justify="right")
+        for t in s.tools.values():
+            avg = t.total_ms / t.calls if t.calls else 0.0
+            tool_table.add_row(t.name, str(t.calls), str(t.errors), f"{avg:.0f}")
+        console.print(tool_table)
