@@ -85,7 +85,7 @@ class PermissionManager:
                 return PermissionVerdict(verdict=VERDICT_DENY, reason=deny)
 
         # 第3层：路径边界检查（文件操作工具）
-        if tool_name in ("read_file", "write_file", "list_dir"):
+        if tool_name in ("read_file", "write_file", "edit_file", "list_dir"):
             outside = self._check_outside_cwd(params.get("path", ""))
             if outside:
                 return PermissionVerdict(verdict=VERDICT_DENY, reason=outside)

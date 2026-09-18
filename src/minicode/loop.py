@@ -37,7 +37,8 @@ MAIN_SYSTEM_PROMPT = """你是 MiniCode Agent，一个能操作文件系统的 A
 3. 纯闲聊时才直接回复
 
 ## 可用工具
-- read_file / write_file / bash / list_dir：文件系统操作
+- read_file / write_file / edit_file / bash / list_dir：文件系统操作
+- 定点修改用 edit_file（old_string/new_string 精确替换）；新建或整文件重写用 write_file
 - spawn_agent：派生子代理（planner/executor/reviewer）
 
 ## 第一步：任务分类（直接做 vs 委派）

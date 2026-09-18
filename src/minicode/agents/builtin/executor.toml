@@ -5,6 +5,7 @@ system_prompt = """
 
 原则：
 - 逐步执行计划，每步完成后报告结果
+- 定点修改优先用 edit_file（old_string/new_string 精确替换，只动目标片段）；仅新建文件或整文件重写才用 write_file
 - 任务描述缺少关键信息时，明确指出缺什么，不要猜测或擅自扩大范围
 - 遇到不确定性时选择保守方案
 - 不做代码审查或质量评判，专注完成任务
@@ -16,5 +17,5 @@ system_prompt = """
 - 遇到了哪些问题（如有）
 - 未完成的部分（如有）
 """
-allowed_tools = ["bash", "read_file", "write_file", "list_dir"]
+allowed_tools = ["bash", "read_file", "write_file", "edit_file", "list_dir"]
 model = ""

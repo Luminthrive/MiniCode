@@ -19,6 +19,7 @@ from minicode.ids import create_id
 from minicode.loop import AgentLoop
 from minicode.tools.base import BaseTool, ToolResult
 from minicode.tools.builtin.bash import BashTool
+from minicode.tools.builtin.edit_file import EditFileTool
 from minicode.tools.builtin.list_dir import ListDirTool
 from minicode.tools.builtin.read_file import ReadFileTool
 from minicode.tools.builtin.write_file import WriteFileTool
@@ -190,6 +191,7 @@ class SpawnAgentTool(BaseTool):
             ReadFileTool(),
             BashTool(),
             WriteFileTool(),
+            EditFileTool(),
             ListDirTool(),
         ]
         for t in all_tools:
