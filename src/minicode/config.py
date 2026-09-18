@@ -52,9 +52,9 @@ def get_config() -> MiniConfig:
     compact_str = os.environ.get("COMPACT_THRESHOLD")
     if compact_str is not None:
         try:
-            val = float(compact_str)
-            if 0.0 <= val <= 1.0:
-                config.compact_threshold = val
+            ratio = float(compact_str)
+            if 0.0 <= ratio <= 1.0:
+                config.compact_threshold = ratio
         except ValueError:
             pass
 
