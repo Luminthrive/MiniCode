@@ -1,4 +1,4 @@
-"""权限沙箱：3层渐进式工具权限评估"""
+"""权限沙箱：分层渐进式工具权限评估（路径边界 → 安全名单 → 黑名单 → 会话缓存 → 审批）"""
 
 from __future__ import annotations
 
@@ -47,9 +47,9 @@ class PermissionVerdict:
 type ApprovalCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
 
 
-# 权限管理器：3层渐进式评估
+# 权限管理器：分层渐进式评估
 class PermissionManager:
-    """3层渐进式工具权限评估：deny_patterns → OUTSIDE_CWD → session缓存"""
+    """分层渐进式工具权限评估：路径边界 → 安全名单 → deny_patterns → 会话缓存 → 审批"""
 
     # 初始化权限管理器
     def __init__(
@@ -74,21 +74,22 @@ class PermissionManager:
         tool_name: str,
         params: dict[str, Any],
     ) -> PermissionVerdict:
-        # 第1层：安全工具直接放行
-        if tool_name in self._safe_tools:
-            return PermissionVerdict(verdict=VERDICT_ALLOW, reason="safe tool")
-
-        # 第2层：命令黑名单检查（bash 工具）
-        if tool_name == "bash":
-            deny = self._check_deny_patterns(params.get("command", ""))
-            if deny:
-                return PermissionVerdict(verdict=VERDICT_DENY, reason=deny)
-
-        # 第3层：路径边界检查（文件操作工具）
+        # 第1层：文件操作先做路径边界检查——安全名单不能越过工作目录边界，
+        # 否则 read_file/list_dir 凭安全名单即可读任意绝对路径
         if tool_name in ("read_file", "write_file", "edit_file", "list_dir"):
             outside = self._check_outside_cwd(params.get("path", ""))
             if outside:
                 return PermissionVerdict(verdict=VERDICT_DENY, reason=outside)
+
+        # 第2层：安全工具直接放行
+        if tool_name in self._safe_tools:
+            return PermissionVerdict(verdict=VERDICT_ALLOW, reason="safe tool")
+
+        # 第3层：命令黑名单检查（bash 工具）
+        if tool_name == "bash":
+            deny = self._check_deny_patterns(params.get("command", ""))
+            if deny:
+                return PermissionVerdict(verdict=VERDICT_DENY, reason=deny)
 
         # 第4层：会话缓存检查
         cache_key = self._cache_key(tool_name, params)
@@ -137,7 +138,8 @@ class PermissionManager:
             return None
         try:
             resolved = (self._cwd / path_str).resolve()
-            if not str(resolved).startswith(str(self._cwd)):
+            # 用 is_relative_to 而非 startswith：后者对前缀同名的兄弟目录（D:\work vs D:\work2）误判
+            if not resolved.is_relative_to(self._cwd):
                 return f"path outside working directory: {path_str}"
         except (ValueError, OSError):
             return f"invalid path: {path_str}"

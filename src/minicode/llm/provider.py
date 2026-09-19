@@ -74,15 +74,16 @@ class OpenAIProvider:
         logger.debug("LLM stream request: model=%s msgs=%d tools=%d",
                       payload["model"], len(payload["messages"]),
                       len(payload.get("tools", [])))
-        text_parts: list[str] = []
-        tool_calls: list[ToolCallBlock] = []
-        usage: UsageStats | None = None
-        stop_reason = "stop"
-        tc_buffer: dict[int, dict[str, Any]] = {}
-        # 思考模型的思考增量：不回传给用户，但要留存以便回传 API
-        reasoning_parts: list[str] = []
-
         for attempt in range(1, _MAX_RETRIES + 1):
+            # 累积缓冲必须每次尝试重置：断流重试时上一轮半截数据已不可信，
+            # 保留会把重复内容叠加进最终响应
+            text_parts: list[str] = []
+            tool_calls: list[ToolCallBlock] = []
+            usage: UsageStats | None = None
+            stop_reason = "stop"
+            tc_buffer: dict[int, dict[str, Any]] = {}
+            # 思考模型的思考增量：不回传给用户，但要留存以便回传 API
+            reasoning_parts: list[str] = []
             try:
                 async with self._client.stream("POST", "/chat/completions", json=payload) as resp:
                     if resp.status_code != 200:
@@ -186,12 +187,19 @@ class OpenAIProvider:
                              stop_reason, len(tool_calls), len("".join(text_parts)))
                 break
 
-            except (
-                httpx.HTTPStatusError,
-                httpx.RemoteProtocolError,
-                httpx.ReadError,
-                httpx.ConnectError,
-            ) as exc:
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                # 4xx（除 408/429）是确定性错误，重试只会原样再失败
+                if 400 <= status < 500 and status not in (408, 429):
+                    raise
+                logger.warning(
+                    "LLM stream error (attempt %d/%d) run_id=%s: %s",
+                    attempt, _MAX_RETRIES, run_id, exc,
+                )
+                if attempt == _MAX_RETRIES:
+                    raise
+                await asyncio.sleep(_RETRY_BACKOFF_S[attempt - 1])
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as exc:
                 logger.warning(
                     "LLM stream error (attempt %d/%d) run_id=%s: %s",
                     attempt, _MAX_RETRIES, run_id, exc,

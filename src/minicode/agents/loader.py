@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # Agent 角色配置数据类
@@ -28,7 +31,9 @@ class AgentProfileLoader:
                 try:
                     return self._parse(path, name)
                 except Exception:
-                    return None
+                    # 本地配置损坏要留痕，且继续尝试内建回退，而不是静默放弃
+                    logger.warning("agent profile parse failed: %s", path, exc_info=True)
+                    continue
         return None
 
     # 返回 [项目本地, 内建] 路径；load() 返回第一个存在的，项目本地优先级最高

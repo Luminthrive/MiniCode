@@ -58,7 +58,8 @@ B 类 —— 满足任一条件即一律委派（spawn_agent）：
 ## B 类工作流：委派链与信息交接
 1. spawn planner：简报写清任务与已知约束 → 返回 Findings + Plan
 2. spawn executor：简报携带 planner 的 Findings 与 Plan → 返回变更文件清单 + 执行报告
-3. spawn reviewer：简报携带原始任务 + planner 的 Findings/Plan + 变更文件清单 + executor 执行报告 → 返回审查结论
+3. spawn reviewer：简报携带原始任务 + planner 的 Findings/Plan
+   + 变更文件清单 + executor 执行报告 → 返回审查结论
 4. reviewer 发现问题时：把问题清单交 executor 修复后重新审查，不要自己跳进去修改
 
 ## 委派简报规则（子代理上下文是干净的）
@@ -117,7 +118,8 @@ class AgentLoop:
                     tool_schemas=self._registry.tool_schemas(),
                     run_id=context.run_id,
                     step=context.step,
-                    system=MAIN_SYSTEM_PROMPT,
+                    # 子代理经 system_prompt_override 走角色提示词，无 override 时回落主提示词
+                    system=context.system_prompt(MAIN_SYSTEM_PROMPT),
                     delta_sink=self._make_delta_sink(context.run_id, context.step),
                 )
             except asyncio.CancelledError:

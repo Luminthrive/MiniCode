@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm
 from rich.table import Table
 
 from minicode import __version__
@@ -28,6 +29,7 @@ from minicode.events.bus import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from minicode.tools.permissions import ApprovalCallback
 
 console = Console()
 
@@ -120,12 +122,38 @@ def _format_duration(start: str, end: str) -> str:
         return "-"
 
 
+# 工具审批回调：危险操作在终端 y/n 确认；非交互环境直接拒绝，避免管道运行时挂死
+def _make_approval_callback() -> ApprovalCallback:
+    async def _ask(tool_name: str, params: dict[str, Any]) -> bool:
+        if not sys.stdin.isatty():
+            console.print(
+                f"  [yellow]⚠[/] [dim]{tool_name} 需审批但当前非交互终端，已拒绝"
+                f"（设 MINICODE_AUTO_APPROVE=1 可跳过审批）[/]",
+                highlight=False,
+            )
+            return False
+        summary = _summarize_args(tool_name, dict(params))
+        try:
+            # 阻塞式终端输入丢线程池执行，避免卡住事件循环
+            return await asyncio.to_thread(
+                Confirm.ask,
+                f"  允许执行 [cyan]{tool_name}[/] [dim]{summary}[/]?",
+                default=False,
+            )
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+    return _ask
+
+
 # 事件打印器：订阅 EventBus，将运行中的各类事件渲染到终端
 class EventPrinter:
     def __init__(self, bus: EventBus) -> None:
         self._inline = False  # 上一条 llm.delta 之后尚未换行
         self._at_line_start = True  # 子代理流式输出是否位于行首（决定补不补 │ 前缀）
         self._current_child: str | None = None
+        # run_id -> 已见最大 attempt：LLM 断流重试会重发增量，须重置渲染状态避免叠印
+        self._last_attempt: dict[str, int] = {}
         # child_run_id -> 聚合信息：子代理块内的 usage/tool 累计，结束时统一展示
         self._subagents: dict[str, dict[str, Any]] = {}
         bus.subscribe(self.handle)
@@ -169,6 +197,16 @@ class EventPrinter:
 
     async def handle(self, event: BaseModel) -> None:
         if isinstance(event, LlmDeltaEvent):
+            last = self._last_attempt.get(event.run_id, 1)
+            if event.attempt > last:
+                # 断流重试：上一轮半截输出已作废，换行提示后从新流重新接收
+                self._ensure_newline()
+                console.print(
+                    f"  [dim]↻ retry attempt {event.attempt}, output restarted[/]",
+                    highlight=False,
+                )
+                self._at_line_start = True
+            self._last_attempt[event.run_id] = max(last, event.attempt)
             # 前台模式下父与子 agent 不会同时流式输出，token 原样追加即可
             self._print_delta(event.text)
             return
@@ -300,7 +338,10 @@ class EventPrinter:
                     f" [dim]{duration} · {agg['tools']} tools"
                     f" · in {agg['in']:,} · out {agg['out']:,}[/]"
                 )
-            console.print(f"  [bold blue]└─[/] {mark}{stats}", highlight=False, no_wrap=True, overflow="ellipsis")
+            console.print(
+                f"  [bold blue]└─[/] {mark}{stats}",
+                highlight=False, no_wrap=True, overflow="ellipsis",
+            )
         # run.started / run.finished 的展示由命令层负责（Goal 面板与状态行）
 
 
@@ -316,7 +357,8 @@ def _run_command(goal: str) -> None:
     bus = EventBus()
     EventPrinter(bus)
     bus.subscribe(EventWriter(Path(".minicode/traces")))
-    runner = AgentRunner(config, bus=bus)
+    approval_callback = None if config.auto_approve else _make_approval_callback()
+    runner = AgentRunner(config, bus=bus, approval_callback=approval_callback)
 
     t0 = time.time()
     console.print()
@@ -348,7 +390,8 @@ def _chat_command(session_id: str = "default") -> None:
     EventPrinter(bus)
     # chat 多轮每轮新建 trace_id，写入端按 trace 自动分目录
     bus.subscribe(EventWriter(Path(".minicode/traces")))
-    runner = AgentRunner(config, bus=bus)
+    approval_callback = None if config.auto_approve else _make_approval_callback()
+    runner = AgentRunner(config, bus=bus, approval_callback=approval_callback)
     store = SessionStore(Path(".minicode/sessions"))
 
     # 加载或创建会话

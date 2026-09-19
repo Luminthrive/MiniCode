@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import locale
-import logging
 import os
 import sys
 from typing import Any
@@ -15,7 +14,6 @@ from minicode.tools.base import BaseTool, ToolResult
 
 _MAX_OUTPUT_BYTES = 64 * 1024  # 64 KB
 _DEFAULT_TIMEOUT = 60
-_DANGEROUS_PATTERNS = ("..", "&amp;", "&amp;&amp;", "|", ";", "$(", "`")
 
 
 # Shell 命令参数模型

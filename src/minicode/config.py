@@ -17,6 +17,8 @@ class MiniConfig:
     llm_api_key: str = ""
     max_steps: int = 30
     compact_threshold: float = 0.80
+    # True 时跳过终端审批（bash/写文件等直接放行）；False 时危险工具需 y/n 确认
+    auto_approve: bool = False
 
 
 # 从 minicode 包目录的 .env 加载配置（不受当前工作目录影响）
@@ -57,5 +59,9 @@ def get_config() -> MiniConfig:
                 config.compact_threshold = ratio
         except ValueError:
             pass
+
+    approve_str = os.environ.get("MINICODE_AUTO_APPROVE")
+    if approve_str is not None:
+        config.auto_approve = approve_str.strip().lower() in ("1", "true", "yes", "on")
 
     return config

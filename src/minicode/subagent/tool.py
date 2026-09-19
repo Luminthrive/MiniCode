@@ -27,6 +27,7 @@ from minicode.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from minicode.llm.base import LLMProvider
+    from minicode.tools.permissions import PermissionManager
 
 _profile_loader = AgentProfileLoader()
 
@@ -83,6 +84,7 @@ class SpawnAgentTool(BaseTool):
         parent_run_id: str,
         max_steps: int,
         depth: int = 0,
+        permission_manager: PermissionManager | None = None,
     ) -> None:
         self._provider = provider
         self._parent_bus = parent_bus
@@ -91,6 +93,8 @@ class SpawnAgentTool(BaseTool):
         self._parent_run_id = parent_run_id
         self._max_steps = max_steps
         self._depth = depth
+        # 与主循环共用同一权限管理器，子代理的文件/命令操作同样受沙箱约束
+        self._permission_manager = permission_manager
 
     # 派生子 agent，前台同步执行并返回结果
     async def invoke(self, params: dict[str, Any]) -> ToolResult:
@@ -129,6 +133,7 @@ class SpawnAgentTool(BaseTool):
             self._parent_bus,
             trace_id=self._parent_trace_id,
             parent_run_id=self._parent_run_id,
+            permission_manager=self._permission_manager,
         )
 
         await self._parent_bus.publish(

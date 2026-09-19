@@ -26,7 +26,7 @@ from minicode.tools.builtin.edit_file import EditFileTool
 from minicode.tools.builtin.list_dir import ListDirTool
 from minicode.tools.builtin.read_file import ReadFileTool
 from minicode.tools.builtin.write_file import WriteFileTool
-from minicode.tools.permissions import PermissionManager
+from minicode.tools.permissions import ApprovalCallback, PermissionManager
 from minicode.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -47,10 +47,17 @@ class RunOutcome:
 
 
 class AgentRunner:
-    # bus 可由外部注入（CLI 预先订阅事件），未注入时每次 run 自建
-    def __init__(self, config: MiniConfig, bus: EventBus | None = None) -> None:
+    # bus 可由外部注入（CLI 预先订阅事件），未注入时每次 run 自建；
+    # approval_callback 注入后，权限评估落到 ask 层时由它询问用户
+    def __init__(
+        self,
+        config: MiniConfig,
+        bus: EventBus | None = None,
+        approval_callback: ApprovalCallback | None = None,
+    ) -> None:
         self._config = config
         self._bus = bus
+        self._approval_callback = approval_callback
 
     def _build_registry(
         self,
@@ -60,6 +67,7 @@ class AgentRunner:
         trace_id: str,
         run_id: str,
         max_steps: int,
+        permission_manager: PermissionManager,
     ) -> ToolRegistry:
         registry = ToolRegistry()
         for t in [ReadFileTool(), BashTool(), WriteFileTool(), EditFileTool(), ListDirTool()]:
@@ -72,6 +80,7 @@ class AgentRunner:
                 parent_run_id=run_id,
                 max_steps=max_steps,
                 depth=0,
+                permission_manager=permission_manager,
             )
         )
         return registry
@@ -113,20 +122,20 @@ class AgentRunner:
         )
 
         cancelled = False
+        provider = OpenAIProvider(
+            model=self._config.llm_model,
+            base_url=self._config.llm_base_url,
+            api_key=self._config.llm_api_key,
+        )
         try:
-            provider = OpenAIProvider(
-                model=self._config.llm_model,
-                base_url=self._config.llm_base_url,
-                api_key=self._config.llm_api_key,
-            )
-
+            permission_manager = PermissionManager(approval_callback=self._approval_callback)
             registry = self._build_registry(
                 provider=provider, bus=bus, trace_id=trace_id, run_id=run_id,
                 max_steps=self._config.max_steps,
+                permission_manager=permission_manager,
             )
 
             compactor = Compactor(session_id or "")
-            permission_manager = PermissionManager()
             loop = AgentLoop(
                 provider, registry, bus,
                 trace_id=trace_id,
@@ -141,8 +150,12 @@ class AgentRunner:
                 context.mark_failed("cancelled")
         except Exception:
             logger.exception("agent run failed run_id=%s step=%d", run_id, context.step)
+            # LLM 错误在 loop 内部已精确标记为 llm_error，走到这里的兜底是其他异常
             if not context.is_done():
-                context.mark_failed("llm_error")
+                context.mark_failed("error")
+        finally:
+            # httpx AsyncClient 持有连接池，不关闭会跨 run 泄漏
+            await provider.close()
 
         await bus.publish(
             RunFinishedEvent(
