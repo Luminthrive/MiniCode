@@ -13,8 +13,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 压缩时原样保留的最近消息条数：刚拿到的工具结果不该被摘要抹掉，否则模型会重复读文件
-_KEEP_RECENT = 4
+# 压缩时原样保留的最近消息条数（含配对回扩，实际保留只多不少）：
+# 8 条 ≈ 最近两轮完整工具交互——更早的历史交给摘要，最近工作的原文留在眼前。
+# 太少（如 4 条只够一轮）会让模型重读文件，步数与 token 反弹；太多则抬高压缩后的
+# 体积地板，大工具结果场景下可能压完仍超阈值。已知局限：条数对单条消息大小盲视
+# （一条 read_file 结果可达 ~13 万 token），根治需按 token 预算保留，暂未实施
+_KEEP_RECENT = 8
 
 _COMPACT_PROMPT = """\
 You are compressing an agent conversation into a handoff summary.
@@ -90,9 +94,11 @@ class Compactor:
     # 计算压缩切分点：保留最近 _KEEP_RECENT 条，且不切断 tool_calls 与 tool 结果的配对
     def _split_index(self, messages: list[dict[str, Any]]) -> int:
         split = max(0, len(messages) - _KEEP_RECENT)
-        # 若切在工具结果中间，这些 tool 消息会失去对应的 assistant tool_calls，API 会拒绝
-        while split < len(messages) and messages[split].get("role") == "tool":
-            split += 1
+        # 边界落在工具结果上时向前回扩到携带它的 assistant(tool_calls)：
+        # tail 必须以 assistant 开头（API 要求 tool 结果紧跟其调用者），
+        # 同时最近的工具结果不会被边界吞进摘要——tail 因此可能略多于 _KEEP_RECENT 条
+        while split > 0 and messages[split].get("role") == "tool":
+            split -= 1
         return split
 
     # 纯函数式压缩：接收消息列表，返回 CompactionResult；失败时返回 None
