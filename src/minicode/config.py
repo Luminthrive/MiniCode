@@ -1,4 +1,4 @@
-"""运行时配置：从环境变量加载"""
+"""运行时配置：从环境变量加载；.minicode 工作区路径约定的唯一出处"""
 
 from __future__ import annotations
 
@@ -7,6 +7,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+# ---- 工作区路径约定（唯一出处，入口/控制器从这里取值，禁止再写字面量）----
+
+# 工作区数据根目录（相对当前工作目录）
+MINICODE_DIR = Path(".minicode")
+# Trace 落盘根目录：每个 trace_id 一个子目录（events.jsonl + meta.json）
+TRACES_DIR = MINICODE_DIR / "traces"
+# 会话持久化根目录：每个 session_id 一个子目录（meta.json + thread.jsonl）
+SESSIONS_DIR = MINICODE_DIR / "sessions"
+# 角色档案搜索目录：项目本地 profile 优先于内建
+AGENTS_DIR = MINICODE_DIR / "agents"
+# TUI 模式日志文件（任何 stderr 输出都会破坏全屏渲染，logging 全部重定向到此）
+TUI_LOG_PATH = MINICODE_DIR / "logs" / "tui.log"
+
 
 
 # 运行时配置数据类

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from minicode.events.bus import (
     ContextCompactedEvent,
@@ -16,6 +19,7 @@ from minicode.events.bus import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from minicode.events.replay import TraceReadError, read_trace
 
 
 # 单个 run（一个 Agent 实例）的明细指标
@@ -142,3 +146,30 @@ def summarize_trace(events: Sequence[Event]) -> TraceSummary:
     summary.tool_calls = sum(r.tool_calls for r in summary.runs)
     summary.tool_errors = sum(r.tool_errors for r in summary.runs)
     return summary
+
+
+# 该 session 最近一次 run 的最后一条 usage 事件（chat 进入时回填状态栏用）
+def last_session_usage(traces_dir: Path, session_id: str) -> LlmUsageEvent | None:
+    """按 meta.json 找到该 session 最新的 trace，取其最后一条 llm.usage；没有则 None"""
+    latest: tuple[str, Path] | None = None  # (created_at, events.jsonl 路径)，ISO 串可比较
+    for meta_path in traces_dir.glob("*/meta.json"):
+        try:
+            meta: dict[str, Any] = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if meta.get("session_id") != session_id:
+            continue
+        created = str(meta.get("created_at") or "")
+        if latest is None or created > latest[0]:
+            latest = (created, meta_path.parent / "events.jsonl")
+    if latest is None or not latest[1].exists():
+        return None
+
+    usage: LlmUsageEvent | None = None
+    try:
+        for event in read_trace(latest[1]):
+            if isinstance(event, LlmUsageEvent):
+                usage = event
+    except TraceReadError:
+        return None
+    return usage
