@@ -10,6 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from minicode.events.bus import (
+    EventBus,
+    PermissionDecidedEvent,
+    PermissionRequestEvent,
+    utc_now_iso,
+)
+
 logger = logging.getLogger(__name__)
 
 # 权限评估结果
@@ -59,20 +66,28 @@ class PermissionManager:
         safe_tools: frozenset[str] | None = None,
         approval_callback: ApprovalCallback | None = None,
         approval_timeout: float = 30.0,
+        bus: EventBus | None = None,
+        trace_id: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         self._cwd = (cwd or Path.cwd()).resolve()
         self._deny_patterns = deny_patterns or _DEFAULT_DENY_PATTERNS
         self._safe_tools = safe_tools or _SAFE_TOOLS
         self._approval_callback = approval_callback
         self._approval_timeout = approval_timeout
+        # 审批事件化：注入 bus + 身份后，审批请求/决定发布为 trace 事件（否则审批对 trace 不可见）
+        self._bus = bus
+        self._trace_id = trace_id
+        self._default_run_id = run_id
         # 会话级缓存：key = (tool_name, frozen_params) → verdict
         self._cache: dict[tuple[str, str], PermissionVerdict] = {}
 
-    # 评估工具调用权限（3层渐进式）
+    # 评估工具调用权限（3层渐进式）；run_id 由调用点传入以正确归属子代理事件
     async def check(
         self,
         tool_name: str,
         params: dict[str, Any],
+        run_id: str | None = None,
     ) -> PermissionVerdict:
         # 第1层：文件操作先做路径边界检查——安全名单不能越过工作目录边界，
         # 否则 read_file/list_dir 凭安全名单即可读任意绝对路径
@@ -101,8 +116,18 @@ class PermissionManager:
                 cached=True,
             )
 
-        # 第5层：需要审批（异步等待用户确认）
+        # 第5层：需要审批（异步等待用户确认）；注入了 bus + trace 身份时审批同步发布为 trace 事件
         if self._approval_callback:
+            event_run_id = run_id or self._default_run_id or ""
+            bus, trace_id = self._bus, self._trace_id
+            if bus is not None and trace_id is not None:
+                await bus.publish(
+                    PermissionRequestEvent(
+                        trace_id=trace_id, run_id=event_run_id,
+                        tool_name=tool_name, args=dict(params),
+                        ts=utc_now_iso(),
+                    )
+                )
             try:
                 approved = await asyncio.wait_for(
                     self._approval_callback(tool_name, params),
@@ -113,6 +138,14 @@ class PermissionManager:
             except TimeoutError:
                 verdict = VERDICT_DENY
                 reason = f"approval timed out after {self._approval_timeout}s"
+            if bus is not None and trace_id is not None:
+                await bus.publish(
+                    PermissionDecidedEvent(
+                        trace_id=trace_id, run_id=event_run_id,
+                        tool_name=tool_name, approved=verdict == VERDICT_ALLOW,
+                        ts=utc_now_iso(),
+                    )
+                )
         else:
             # 无审批回调时默认允许
             verdict = VERDICT_ALLOW

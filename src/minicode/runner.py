@@ -48,16 +48,19 @@ class RunOutcome:
 
 class AgentRunner:
     # bus 可由外部注入（CLI 预先订阅事件），未注入时每次 run 自建；
-    # approval_callback 注入后，权限评估落到 ask 层时由它询问用户
+    # approval_callback 注入后，权限评估落到 ask 层时由它询问用户；
+    # approval_timeout 覆盖审批等待上限（TUI 读 diff 场景可调大）
     def __init__(
         self,
         config: MiniConfig,
         bus: EventBus | None = None,
         approval_callback: ApprovalCallback | None = None,
+        approval_timeout: float | None = None,
     ) -> None:
         self._config = config
         self._bus = bus
         self._approval_callback = approval_callback
+        self._approval_timeout = approval_timeout
 
     def _build_registry(
         self,
@@ -128,7 +131,13 @@ class AgentRunner:
             api_key=self._config.llm_api_key,
         )
         try:
-            permission_manager = PermissionManager(approval_callback=self._approval_callback)
+            permission_kwargs: dict[str, Any] = {"approval_callback": self._approval_callback}
+            if self._approval_timeout is not None:
+                permission_kwargs["approval_timeout"] = self._approval_timeout
+            # 注入 bus + trace/run 身份：审批请求/决定得以发布为 trace 事件
+            permission_manager = PermissionManager(
+                bus=bus, trace_id=trace_id, run_id=run_id, **permission_kwargs
+            )
             registry = self._build_registry(
                 provider=provider, bus=bus, trace_id=trace_id, run_id=run_id,
                 max_steps=self._config.max_steps,

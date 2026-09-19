@@ -55,9 +55,11 @@ async def _invoke_with_retries(
             error_type="runtime_error",
         )
 
-    # 权限检查
+    # 权限检查（传 run_id 让审批事件正确归属到当前 run，子代理场景尤为关键）
     if permission_manager is not None:
-        verdict = await permission_manager.check(tool_call.name, dict(tool_call.input))
+        verdict = await permission_manager.check(
+            tool_call.name, dict(tool_call.input), run_id=run_id
+        )
         if verdict.verdict == "deny":
             return ToolResult(
                 content=f"permission denied: {verdict.reason}",

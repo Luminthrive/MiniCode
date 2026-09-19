@@ -112,6 +112,20 @@ class SubagentFinishedEvent(BaseEvent):
     reason: str | None = None
 
 
+# 权限审批请求事件：进入审批回调前发布（审批此前对 trace 不可见，此事件补上审计缺口）
+class PermissionRequestEvent(BaseEvent):
+    type: Literal["permission.request"] = "permission.request"
+    tool_name: str
+    args: dict[str, object]
+
+
+# 权限审批决定事件：审批回调返回后发布（含超时拒绝）
+class PermissionDecidedEvent(BaseEvent):
+    type: Literal["permission.decided"] = "permission.decided"
+    tool_name: str
+    approved: bool
+
+
 # 全部事件的判别联合，供订阅端统一分发/序列化
 Event = Annotated[
     RunStartedEvent
@@ -122,7 +136,9 @@ Event = Annotated[
     | ToolResultEvent
     | ContextCompactedEvent
     | SubagentStartedEvent
-    | SubagentFinishedEvent,
+    | SubagentFinishedEvent
+    | PermissionRequestEvent
+    | PermissionDecidedEvent,
     Field(discriminator="type"),
 ]
 

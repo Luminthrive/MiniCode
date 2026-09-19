@@ -32,15 +32,6 @@ class SessionStore:
     def session_dir(self, sid: str) -> Path:
         return self._root / sid
 
-    # 列出所有会话 ID
-    def list_sessions(self) -> list[str]:
-        if not self._root.exists():
-            return []
-        return sorted(
-            d.name for d in self._root.iterdir()
-            if d.is_dir() and (d / "thread.jsonl").exists()
-        )
-
     # 将 session meta 写入 meta.json
     def write_meta(self, session: Session) -> None:
         path = self.session_dir(session.id)
