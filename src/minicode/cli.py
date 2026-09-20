@@ -1,4 +1,14 @@
-"""CLI 入口：argparse 子命令（rich 渲染 + 流式输出）"""
+"""CLI 入口：四个子命令，每个命令一个 _xxx_command 组装函数
+
+    run     一次性任务：AgentController(session_id=None) + RichRenderer 线性输出（可管道）
+    chat    交互式聊天：AgentController + Textual TUI（全屏接管终端）
+    replay  把历史 trace 的事件重放给 RichRenderer（离线，不调用 LLM）
+    stats   从历史 trace 统计运行指标（离线，不调用 LLM）
+
+两个约定：
+    - 子命令的 import 写在函数体内：`minicode --version` 之类不必加载 rich/textual
+    - chat 与 run 统一走 AgentController（Application 层），CLI 只负责选渲染器 + 装配
+"""
 
 from __future__ import annotations
 
@@ -7,34 +17,18 @@ import asyncio
 import logging
 import sys
 import time
-from datetime import UTC, datetime
-from typing import Any
 
-from pydantic import BaseModel
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm
 from rich.table import Table
 
 from minicode import __version__
-from minicode.events.bus import (
-    ContextCompactedEvent,
-    EventBus,
-    LlmDeltaEvent,
-    LlmUsageEvent,
-    RunFinishedEvent,
-    RunStartedEvent,
-    SubagentFinishedEvent,
-    SubagentStartedEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-)
-from minicode.tools.permissions import ApprovalCallback
+from minicode.events.bus import EventBus, RunFinishedEvent, RunStartedEvent
 
 console = Console()
 
 
-# 配置日志级别
+# 日志输出到 stderr（chat 模式例外：全屏渲染，_chat_command 内重定向到文件）
 def _setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.WARNING
     logging.basicConfig(
@@ -44,327 +38,70 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
-# CLI 主入口
-def main() -> None:
+# 子命令解析器：新增命令 = 这里加一个 subparser + 一个 _command 函数 + main 里一行分发
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="minicode",
         description="MiniCode - 轻量级本地 AI Agent 系统",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true", help="显示调试日志")
-    subparsers = parser.add_subparsers(dest="command")
-    run_parser = subparsers.add_parser("run", help="执行一次 agent run")
-    run_parser.add_argument("goal", help="Task description")
-    chat_parser = subparsers.add_parser("chat", help="交互式聊天模式")
-    chat_parser.add_argument("-s", "--session", default="default", help="会话 ID（默认 default）")
-    replay_parser = subparsers.add_parser("replay", help="离线回放一次历史 trace（不调用 LLM）")
-    replay_parser.add_argument("trace_id", help="Trace ID（.minicode/traces 下的目录名）")
-    stats_parser = subparsers.add_parser("stats", help="输出一次 trace 的运行指标汇总")
-    stats_parser.add_argument("trace_id", help="Trace ID（.minicode/traces 下的目录名）")
-    args = parser.parse_args()
-    _setup_logging(args.verbose)
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
+    run = subparsers.add_parser("run", help="执行一次 agent run")
+    run.add_argument("goal", help="Task description")
+
+    chat = subparsers.add_parser("chat", help="交互式聊天模式（TUI）")
+    chat.add_argument("-s", "--session", default="default", help="会话 ID（默认 default）")
+
+    replay = subparsers.add_parser("replay", help="离线回放一次历史 trace（不调用 LLM）")
+    replay.add_argument("trace_id", help="Trace ID（.minicode/traces 下的目录名）")
+
+    stats = subparsers.add_parser("stats", help="输出一次 trace 的运行指标汇总")
+    stats.add_argument("trace_id", help="Trace ID（.minicode/traces 下的目录名）")
+    return parser
+
+
+# CLI 主入口：只做分发；每个命令的组装逻辑在自己的 _command 里
+def main() -> None:
+    args = _build_parser().parse_args()
+
+    if args.command == "chat":
+        _chat_command(args.session, verbose=args.verbose)
+        return
+    _setup_logging(args.verbose)
     if args.command == "run":
         _run_command(args.goal)
-    elif args.command == "chat":
-        _chat_command(session_id=args.session)
     elif args.command == "replay":
         _replay_command(args.trace_id)
     elif args.command == "stats":
         _stats_command(args.trace_id)
-    else:
-        parser.print_help()
-
-
-# 工具参数摘要：单行显示
-def _summarize_args(name: str, args: dict[str, Any]) -> str:
-    """生成工具参数的单行摘要；bash 完整显示命令，多行命令折叠为首行 + 行数"""
-    if name == "bash":
-        cmd = str(args.get("command", "?"))
-        lines = cmd.splitlines() or ["?"]
-        first = lines[0]
-        if len(first) > 120:
-            first = first[:120] + "..."
-        if len(lines) > 1:
-            first += f" (+{len(lines) - 1} lines)"
-        return first
-    if name == "edit_file":
-        path = str(args.get("path", "?"))
-        old_lines = str(args.get("old_string", "")).splitlines() or [""]
-        new_lines = str(args.get("new_string", "")).splitlines() or [""]
-        suffix = f" (+{len(old_lines) - 1} lines)" if len(old_lines) > 1 else ""
-
-        # 取第一处差异行展示：old/new 首行常是相同的段落标记，差异行才有辨识度
-        i = 0
-        while i < min(len(old_lines), len(new_lines)) and old_lines[i] == new_lines[i]:
-            i += 1
-        old_first = old_lines[i] if i < len(old_lines) else ""
-        new_first = new_lines[i] if i < len(new_lines) else ""
-
-        def _clip(s: str) -> str:
-            return s[:32] + "..." if len(s) > 32 else s
-
-        return f"{path}{suffix}: {_clip(old_first)} -> {_clip(new_first)}"
-    if name in ("read_file", "write_file", "list_dir"):
-        return str(args.get("path", "."))
-    if name == "spawn_agent":
-        agent_type = args.get("subagent_type") or "default"
-        return f"{agent_type} · {args.get('description', '')}"
-    return str(args)[:60]
-
-
-# 由事件 ts 计算时长（replay 回放时也能得到真实耗时）
-def _format_duration(start: str, end: str) -> str:
-    try:
-        delta = datetime.fromisoformat(end) - datetime.fromisoformat(start)
-        return f"{delta.total_seconds():.1f}s"
-    except ValueError:
-        return "-"
-
-
-# 工具审批回调：危险操作在终端 y/n 确认；非交互环境直接拒绝，避免管道运行时挂死
-def _make_approval_callback() -> ApprovalCallback:
-    async def _ask(tool_name: str, params: dict[str, Any]) -> bool:
-        if not sys.stdin.isatty():
-            console.print(
-                f"  [yellow]⚠[/] [dim]{tool_name} 需审批但当前非交互终端，已拒绝"
-                f"（设 MINICODE_AUTO_APPROVE=1 可跳过审批）[/]",
-                highlight=False,
-            )
-            return False
-        summary = _summarize_args(tool_name, dict(params))
-        try:
-            # 阻塞式终端输入丢线程池执行，避免卡住事件循环
-            return await asyncio.to_thread(
-                Confirm.ask,
-                f"  允许执行 [cyan]{tool_name}[/] [dim]{summary}[/]?",
-                default=False,
-            )
-        except (EOFError, KeyboardInterrupt):
-            return False
-
-    return _ask
-
-
-# 事件打印器：订阅 EventBus，将运行中的各类事件渲染到终端
-class EventPrinter:
-    def __init__(self, bus: EventBus) -> None:
-        self._inline = False  # 上一条 llm.delta 之后尚未换行
-        self._at_line_start = True  # 子代理流式输出是否位于行首（决定补不补 │ 前缀）
-        self._current_child: str | None = None
-        # run_id -> 已见最大 attempt：LLM 断流重试会重发增量，须重置渲染状态避免叠印
-        self._last_attempt: dict[str, int] = {}
-        # child_run_id -> 聚合信息：子代理块内的 usage/tool 累计，结束时统一展示
-        self._subagents: dict[str, dict[str, Any]] = {}
-        bus.subscribe(self.handle)
-
-    # 补一个换行，避免后续事件行接在未结束的流式文本后半行
-    def _ensure_newline(self) -> None:
-        if self._inline:
-            console.print()
-            self._inline = False
-
-    # 判断事件是否来自子 agent（决定缩进层级）
-    def _is_child(self, event: BaseModel) -> bool:
-        if getattr(event, "parent_run_id", None) is not None:
-            return True
-        return event.run_id in self._subagents  # type: ignore[attr-defined]
-
-    # 流式输出：子代理文本带 │ 前缀与 dim 样式，与主 agent 输出区分层级
-    def _print_delta(self, text: str) -> None:
-        if self._current_child is None:
-            console.print(text, end="", markup=False, highlight=False)
-            self._inline = True
-            return
-        if not text:
-            return
-        if self._at_line_start:
-            console.print("  │ ", end="", markup=False, highlight=False)
-            self._at_line_start = False
-        body = text.replace("\r\n", "\n")
-        trailing = body.endswith("\n")
-        if trailing:
-            body = body[:-1]
-        body = body.replace("\n", "\n  │ ")
-        if body:
-            console.print(body, end="", markup=False, highlight=False, style="dim")
-        if trailing:
-            console.print()
-            self._at_line_start = True
-            self._inline = False
-        else:
-            self._inline = True
-
-    async def handle(self, event: BaseModel) -> None:
-        if isinstance(event, LlmDeltaEvent):
-            last = self._last_attempt.get(event.run_id, 1)
-            if event.attempt > last:
-                # 断流重试：上一轮半截输出已作废，换行提示后从新流重新接收
-                self._ensure_newline()
-                console.print(
-                    f"  [dim]↻ retry attempt {event.attempt}, output restarted[/]",
-                    highlight=False,
-                )
-                self._at_line_start = True
-            self._last_attempt[event.run_id] = max(last, event.attempt)
-            # 前台模式下父与子 agent 不会同时流式输出，token 原样追加即可
-            self._print_delta(event.text)
-            return
-
-        self._ensure_newline()
-        # 非流式事件打印都会另起一行，流式前缀标志随之复位
-        # （否则子代理下一段文本会因标志滞留 False 而顶格漏出 │ gutter）
-        self._at_line_start = True
-
-        if isinstance(event, LlmUsageEvent):
-            agg = self._subagents.get(event.run_id)
-            if agg is not None:
-                # 子代理 usage 不逐条打印，累计进结束行
-                agg["in"] += event.input_tokens
-                agg["out"] += event.output_tokens
-                return
-            console.print(
-                f"  [dim]· ctx {event.context_pct:.0%}"
-                f" | in {event.input_tokens:,} · out {event.output_tokens:,}[/]",
-                highlight=False,
-            )
-        elif isinstance(event, ToolCallEvent):
-            child = self._is_child(event)
-            if child and event.run_id in self._subagents:
-                self._subagents[event.run_id]["tools"] += 1
-            indent = "  │   " if child else "  "
-            summary = _summarize_args(event.tool_name, dict(event.args))
-            console.print(
-                f"{indent}[bold yellow]⚡[/] [cyan]{event.tool_name}[/] [dim]{summary}[/]",
-                highlight=False,
-                no_wrap=True,
-                overflow="ellipsis",
-            )
-        elif isinstance(event, ToolResultEvent):
-            indent = "  │     " if self._is_child(event) else "    "
-            elapsed = (
-                f" [dim]({event.elapsed_ms}ms)[/]" if event.elapsed_ms is not None else ""
-            )
-            # 子代理最终报告已在块内流式输出过，这里只报大小不重复内容
-            if event.tool_name == "spawn_agent" and not event.is_error:
-                console.print(
-                    f"{indent}[bold green]✓[/] [dim]subagent result: "
-                    f"{len(event.content):,} chars{elapsed}[/]",
-                    highlight=False,
-                    no_wrap=True,
-                    overflow="ellipsis",
-                )
-                return
-
-            # 跳过开头空行，取第一个非空行做预览（PowerShell 输出常以空行开头）
-            lines = event.content.splitlines()
-            start = next((i for i, ln in enumerate(lines) if ln.strip()), None)
-            if event.is_error:
-                if start is None:
-                    console.print(
-                        f"{indent}[bold red]✗[/] [red](empty error)[/]{elapsed}",
-                        highlight=False,
-                        no_wrap=True,
-                        overflow="ellipsis",
-                    )
-                    return
-                kept = [ln.strip()[:100] for ln in lines[start:start + 2]]
-                extra = len(lines) - start - len(kept)
-                console.print(
-                    f"{indent}[bold red]✗[/] [red]{kept[0]}[/]{elapsed}",
-                    highlight=False,
-                    no_wrap=True,
-                    overflow="ellipsis",
-                )
-                for ln in kept[1:]:
-                    console.print(
-                        f"{indent}  [red]{ln}[/]",
-                        highlight=False,
-                        no_wrap=True,
-                        overflow="ellipsis",
-                    )
-                if extra > 0:
-                    console.print(
-                        f"{indent}  [dim](+{extra} lines)[/]", highlight=False
-                    )
-            else:
-                if start is None:
-                    body, note = "(empty output)", ""
-                else:
-                    raw = lines[start].strip()
-                    body = raw[:72] + "..." if len(raw) > 72 else raw
-                    extra = len(lines) - start - 1
-                    note = f" (+{extra} lines)" if extra > 0 else ""
-                console.print(
-                    f"{indent}[bold green]✓[/] [dim]{body}{note}{elapsed}[/]",
-                    highlight=False,
-                    no_wrap=True,
-                    overflow="ellipsis",
-                )
-        elif isinstance(event, ContextCompactedEvent):
-            indent = "  │   " if self._is_child(event) else "  "
-            console.print(
-                f"{indent}[bold magenta]📦[/] [dim]context compacted: "
-                f"{event.original_tokens:,} → {event.summary_tokens:,} tokens[/]",
-                highlight=False,
-            )
-        elif isinstance(event, SubagentStartedEvent):
-            self._subagents[event.run_id] = {
-                "description": event.description,
-                "started": event.ts,
-                "tools": 0,
-                "in": 0,
-                "out": 0,
-            }
-            self._current_child = event.run_id
-            self._at_line_start = True
-            console.print(
-                f"  [bold blue]┌─[/] [bold]{event.description}[/] [dim]({event.run_id[:12]})[/]",
-                highlight=False,
-                no_wrap=True,
-                overflow="ellipsis",
-            )
-        elif isinstance(event, SubagentFinishedEvent):
-            agg = self._subagents.pop(event.run_id, None)
-            self._current_child = None
-            if event.status == "success":
-                mark = "[bold green]✓[/]"
-            else:
-                mark = f"[bold red]✗[/][dim] ({event.reason or event.status})[/]"
-            stats = ""
-            if agg is not None:
-                duration = _format_duration(agg["started"], event.ts)
-                stats = (
-                    f" [dim]{duration} · {agg['tools']} tools"
-                    f" · in {agg['in']:,} · out {agg['out']:,}[/]"
-                )
-            console.print(
-                f"  [bold blue]└─[/] {mark}{stats}",
-                highlight=False, no_wrap=True, overflow="ellipsis",
-            )
-        # run.started / run.finished 的展示由命令层负责（Goal 面板与状态行）
 
 
 def _run_command(goal: str) -> None:
-    """执行一次 agent run"""
-    from pathlib import Path
-
+    """执行一次 agent run（RichRenderer 线性渲染，可管道）；装配统一在 AgentController"""
+    from minicode.application.agent_controller import AgentController
     from minicode.config import get_config
-    from minicode.events.writer import EventWriter
-    from minicode.runner import AgentRunner
+    from minicode.ui.rich import RichRenderer, make_terminal_approval_callback
 
     config = get_config()
-    bus = EventBus()
-    EventPrinter(bus)
-    bus.subscribe(EventWriter(Path(".minicode/traces")))
-    approval_callback = None if config.auto_approve else _make_approval_callback()
-    runner = AgentRunner(config, bus=bus, approval_callback=approval_callback)
+    # run 模式：session_id=None（一次性任务，无会话持久化）。
+    # 审批回调由入口注入；auto_approve 时传 None = 跳过所有审批
+    controller = AgentController(
+        config,
+        session_id=None,
+        approval_callback=(
+            None if config.auto_approve else make_terminal_approval_callback(console)
+        ),
+    )
+    # 渲染器构造即订阅 controller.bus：run 期间事件实时打印，无需手动接线
+    RichRenderer(controller.bus)
 
     t0 = time.time()
     console.print()
     console.print(Panel(goal, title="[bold]Goal[/bold]", border_style="blue"))
 
-    outcome = asyncio.run(runner.run_and_capture(goal))
+    outcome = asyncio.run(controller.submit(goal))
 
     elapsed = time.time() - t0
     console.print()
@@ -375,90 +112,35 @@ def _run_command(goal: str) -> None:
         sys.exit(1)
 
 
-def _chat_command(session_id: str = "default") -> None:
-    """交互式聊天模式（支持多会话持久化）"""
-    from pathlib import Path
+def _chat_command(session_id: str, verbose: bool) -> None:
+    """交互式聊天：全屏 Textual TUI。组装与审批/事件接线都封装在 MiniCodeTuiApp 内，
+    这里只负责：终端检查 → 日志重定向 → 建 controller → 建 App 并运行
+    """
+    from minicode.application.agent_controller import AgentController
+    from minicode.config import TUI_LOG_PATH, get_config
+    from minicode.ui.tui import MiniCodeTuiApp, setup_tui_logging
 
-    from minicode.config import get_config
-    from minicode.events.writer import EventWriter
-    from minicode.runner import AgentRunner
-    from minicode.session.model import Session
-    from minicode.session.store import SessionStore
-
-    config = get_config()
-    bus = EventBus()
-    EventPrinter(bus)
-    # chat 多轮每轮新建 trace_id，写入端按 trace 自动分目录
-    bus.subscribe(EventWriter(Path(".minicode/traces")))
-    approval_callback = None if config.auto_approve else _make_approval_callback()
-    runner = AgentRunner(config, bus=bus, approval_callback=approval_callback)
-    store = SessionStore(Path(".minicode/sessions"))
-
-    # 加载或创建会话
-    session = store.read_meta(session_id)
-    if session is None:
-        session = Session(
-            id=session_id,
-            mode="chat",
-            status="active",
-            title=session_id,
-            created_at=datetime.now(UTC).isoformat(),
-            updated_at=datetime.now(UTC).isoformat(),
+    # chat 需要交互终端（全屏接管）；脚本/管道场景请用 run
+    if not sys.stdin.isatty():
+        console.print(
+            "[yellow]⚠[/yellow] [dim]chat 模式需要交互终端（Textual TUI）。"
+            "脚本/管道场景请使用 minicode run。[/]",
+            highlight=False,
         )
-        store.write_meta(session)
-        console.print(f"[dim]✨ Created new session: {session_id}[/dim]")
-    else:
-        console.print(f"[dim]📂 Session: {session_id}[/dim]")
+        sys.exit(1)
+    setup_tui_logging(TUI_LOG_PATH, verbose=verbose)
 
-    history = store.read_messages(session.id)
-    if history:
-        console.print(f"[dim]📂 Loaded {len(history)} previous messages[/dim]")
-
-    console.print()
-    console.print(
-        Panel("type 'quit' to exit", title="[bold]MiniCode Chat[/bold]", border_style="blue")
-    )
-    console.print()
-
-    while True:
-        try:
-            user_input = console.input("[bold cyan]>[/bold cyan] ")
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]Goodbye![/dim]")
-            break
-
-        if user_input.strip().lower() in ("quit", "exit"):
-            console.print("[dim]Goodbye![/dim]")
-            break
-        if not user_input.strip():
-            continue
-
-        t0 = time.time()
-        outcome = asyncio.run(runner.run_and_capture(
-            user_input,
-            session_id=session.id,
-            store=store,
-            prefill_messages=history,
-        ))
-        elapsed = time.time() - t0
-
-        console.print()
-        status_style = "bold green" if outcome.status == "success" else "bold red"
-        console.print(f"[{status_style}][{outcome.status}] {elapsed:.1f}s[/]", highlight=False)
-        console.print()
-
-        # 落盘由 runner 负责；这里只需同步内存中的会话状态
-        history = outcome.messages
+    controller = AgentController(get_config(), session_id=session_id)
+    MiniCodeTuiApp(controller).run()
 
 
 def _replay_command(trace_id: str) -> None:
-    """离线回放历史 trace：读取 events.jsonl 重新交给 EventPrinter 渲染（不调用 LLM）"""
-    import asyncio
-    from pathlib import Path
-
+    """离线回放历史 trace：把落盘事件按顺序重发进总线，零改动复用 RichRenderer（不调 LLM）"""
+    from minicode.config import TRACES_DIR
     from minicode.events.replay import TraceReadError, read_trace
+    from minicode.ui.rich import RichRenderer
 
-    path = Path(".minicode/traces") / trace_id / "events.jsonl"
+    path = TRACES_DIR / trace_id / "events.jsonl"
     if not path.exists():
         console.print(f"[red]trace 不存在: {trace_id}[/red]（未找到 {path}）")
         sys.exit(1)
@@ -479,9 +161,9 @@ def _replay_command(trace_id: str) -> None:
     console.print()
     console.print(Panel(goal, title=f"[bold]Trace {trace_id}[/bold]", border_style="blue"))
 
-    # 逐条重发到临时总线，零改动复用 EventPrinter 的渲染逻辑
+    # 逐条重发到临时总线，RichRenderer 像实时运行一样渲染
     bus = EventBus()
-    EventPrinter(bus)
+    RichRenderer(bus)
 
     async def _replay() -> None:
         for event in events:
@@ -496,12 +178,11 @@ def _replay_command(trace_id: str) -> None:
 
 def _stats_command(trace_id: str) -> None:
     """基于 trace 事件流计算运行指标（不调用 LLM）"""
-    from pathlib import Path
-
+    from minicode.config import TRACES_DIR
     from minicode.events.metrics import summarize_trace
     from minicode.events.replay import TraceReadError, read_trace
 
-    path = Path(".minicode/traces") / trace_id / "events.jsonl"
+    path = TRACES_DIR / trace_id / "events.jsonl"
     if not path.exists():
         console.print(f"[red]trace 不存在: {trace_id}[/red]（未找到 {path}）")
         sys.exit(1)
